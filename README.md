@@ -36,6 +36,15 @@ Real workflows it supports today:
 | Model changing | `se_model_build` `se_extrude_on_face` `se_invoke_member` `se_invoke_chain` `se_recipe_run` |
 | Escape hatch | `se_script_run` (run a C# script against the COM API) |
 
+Events server (`solidedge-event-mcp`):
+
+| Tool | Purpose |
+|---|---|
+| `se_get_events` | Read events accumulated in the ring buffer (incremental) |
+| `se_wait_event` | Block until a matching event arrives (poll loop helper) |
+| `se_set_event_filter` | Enable/disable event sources to cut noise (e.g. silence command events while waiting for recompute) |
+| `se_event_status` | Diagnostics: SE connection, per-interface subscription state, buffer stats — start here when events don't fire |
+
 ## Permission model
 
 Set the `SE_MCP_MODE` environment variable on the server entry in your MCP config:
@@ -47,6 +56,8 @@ Set the `SE_MCP_MODE` environment variable on the server entry in your MCP confi
 | anything else | Fail-closed: treated as `readonly` |
 
 Legacy `SE_MCP_READONLY=1` is still honored and maps to `readonly`. Changing the mode requires restarting the MCP session (the AI client reloads the server).
+
+Tool risk tiers behind the gate: **Read** (12 query tools) / **Session** (open/new/close document) / **Model** (5 model-changing tools) / **Escape** (`se_script_run`). Unregistered tools are fail-closed (treated as the highest tier).
 
 There is also a member-level guardrail (`Guardrail`) as a second onion layer, and every tool call is written to an audit log at `%LOCALAPPDATA%\SolidEdgeSpy\mcp-audit.log`.
 
@@ -103,6 +114,8 @@ solidedge-mcp.exe get_document
 solidedge-mcp.exe invoke_member --objectId <id> --member Name
 ```
 
+Common switches: `-d` document / `-s` selection / `--vars` variables / `-w` walk / `-desc` describe / `-p` find paths / `--geometry` / `--viewctx` / `--batchread` / `--snap` / `--probe` / `--preview`. Write-style switches (`--newpart`, `--newclose`, `--model`, `--set`, `--openclose`, `--cs`, `--recipe-run`) go through the same permission gate: in `readonly` mode they are rejected before touching Solid Edge. Run `solidedge-mcp.exe --help` for the full list.
+
 ## Architecture
 
 ```
@@ -134,6 +147,35 @@ dotnet test tests/SolidEdge.Spy.McpServer.Tests
 ```
 
 Tests are pure .NET (no Solid Edge required) and cover parsing, validation rules, the permission tier table, and the transport tap.
+
+## FAQ
+
+**The server says it cannot connect to Solid Edge.**
+Start Solid Edge first. The server attaches to the running instance automatically and retries on the next tool call — startup never blocks on it.
+
+**A tool call was rejected with "已拒绝 ... SE_MCP_MODE".**
+You are in `readonly` mode and the tool belongs to a write tier. Set `SE_MCP_MODE=full` (or remove the variable) in your MCP config and restart the session.
+
+**I changed the config but nothing happened.**
+MCP servers are spawned by the AI client when the session starts. Restart the conversation after any `mcp.json` change — tools cached from the old process keep serving until then.
+
+**Which Solid Edge versions are supported?**
+The interop package version matches the SE type-library version: `108.0.0` = SE2022. For other SE versions, bump the `Interop.SolidEdge` PackageReference to the matching version (105–220 exist on NuGet), or generate interop assemblies from your own install with `scripts/gen_interop.ps1`.
+
+**Is it safe to let an AI operate my CAD?**
+Defense in depth: transport-layer mode gate (readonly/full), member-level guardrail on write calls, document-session tracking (`close` only closes documents the session itself opened), and an audit log of every tool call at `%LOCALAPPDATA%\SolidEdgeSpy\mcp-audit.log`. `dry-run` validation runs before any real modeling change.
+
+**The AI hangs when Solid Edge shows a dialog.**
+It doesn't: a popup probe detects modal dialogs and reports their title and buttons instead of blocking until timeout.
+
+## Roadmap
+
+- [ ] Published Release binaries (no SDK needed to try)
+- [ ] GitHub Actions CI (build + test on push)
+- [ ] More recipe examples (drawing automation, BOM extraction)
+- [ ] Tool documentation site
+
+Contributions welcome — open an issue or PR.
 
 ## Credits & license
 

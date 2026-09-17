@@ -36,6 +36,15 @@ Solid Edge 始终是唯一事实源：AI 不替代你的 CAD 工作流，而是�
 | 改动模型 | `se_model_build` `se_extrude_on_face` `se_invoke_member` `se_invoke_chain` `se_recipe_run` |
 | 逃生通道 | `se_script_run`（对 COM API 跑一段 C# 脚本） |
 
+事件 server（`solidedge-event-mcp`）：
+
+| 工具 | 用途 |
+|---|---|
+| `se_get_events` | 增量读取环形缓冲中累积的事件 |
+| `se_wait_event` | 阻塞等待匹配的事件到达（轮询助手） |
+| `se_set_event_filter` | 开关事件源降噪（如等重算完成时静默命令类事件） |
+| `se_event_status` | 诊断：SE 连接状态、各事件接口订阅结果、缓冲统计——事件不触发时先查它 |
+
 ## 权限模式
 
 在 MCP 配置的 server 节点上设置 `SE_MCP_MODE` 环境变量：
@@ -47,6 +56,8 @@ Solid Edge 始终是唯一事实源：AI 不替代你的 CAD 工作流，而是�
 | 其他任意值 | fail-closed，按 `readonly` 处理 |
 
 旧的 `SE_MCP_READONLY=1` 仍然兼容，等价 `readonly`。改模式后需要重启 AI 会话（客户端重载 MCP server 才生效）。
+
+门禁背后的工具风险档位：**Read**（12 个查询工具）/ **Session**（open/new/close 文档）/ **Model**（5 个改模型工具）/ **Escape**（`se_script_run`）。未登记工具 fail-closed，按最高危处理。
 
 另外还有第二层洋葱：成员级护栏（`Guardrail`），并且每次工具调用都会写入审计日志 `%LOCALAPPDATA%\SolidEdgeSpy\mcp-audit.log`。
 
@@ -103,6 +114,8 @@ solidedge-mcp.exe get_document
 solidedge-mcp.exe invoke_member --objectId <id> --member Name
 ```
 
+常用开关：`-d` 文档 / `-s` 选中集 / `--vars` 变量 / `-w` 遍历 / `-desc` 描述 / `-p` 找路径 / `--geometry` 几何 / `--viewctx` 视图 / `--batchread` 批读 / `--snap` 快照对比 / `--probe` / `--preview`。写类开关（`--newpart`、`--newclose`、`--model`、`--set`、`--openclose`、`--cs`、`--recipe-run`）走同一张权限门禁表：readonly 模式下在触碰 Solid Edge 之前就被拒绝。完整清单见 `solidedge-mcp.exe --help`。
+
 ## 架构
 
 ```
@@ -134,6 +147,35 @@ dotnet test tests/SolidEdge.Spy.McpServer.Tests
 ```
 
 测试是纯 .NET 的（不依赖 Solid Edge），覆盖解析、校验规则、权限档位表、传输层 tap。
+
+## FAQ
+
+**server 连不上 Solid Edge？**
+先启动 Solid Edge。server 会自动连接运行中的实例，连不上也不阻塞启动，下次工具调用时重试。
+
+**工具调用被拒绝，提示"已拒绝 ... SE_MCP_MODE"？**
+当前处于 readonly 模式，该工具属于写档位。在 MCP 配置里把 `SE_MCP_MODE` 改为 `full`（或删掉该变量）后重启会话。
+
+**改了配置但没生效？**
+MCP server 由 AI 客户端在会话启动时拉起，任何 `mcp.json` 改动都需要重启会话——旧进程缓存的工具会一直服务到那时。
+
+**支持哪些 Solid Edge 版本？**
+互操作包版本号对应 SE 类型库版本：`108.0.0` = SE2022。其他 SE 版本把 `Interop.SolidEdge` 的 PackageReference 换成对应版本号（NuGet 上 105–220 都有），或用 `scripts/gen_interop.ps1` 从本机安装的 SE 生成。
+
+**让 AI 操作我的 CAD 安全吗？**
+纵深防御：传输层模式门禁（readonly/full）、写调用的成员级护栏、文档会话追踪（`close` 只关本会话自己打开的文档，绝不误关用户文档）、每次工具调用的审计日志（`%LOCALAPPDATA%\SolidEdgeSpy\mcp-audit.log`）。真正的建模改动之前会先跑 `dry-run` 静态校验。
+
+**Solid Edge 弹了模态框，AI 会卡死吗？**
+不会：弹窗探针检测到模态框时直接上报框标题和按钮，而不是傻等到超时。
+
+## Roadmap
+
+- [ ] 发布 Release 二进制（不用装 SDK 也能试用）
+- [ ] GitHub Actions CI（push 时自动 build + test）
+- [ ] 更多配方示例（出图自动化、BOM 提取）
+- [ ] 工具文档站
+
+欢迎贡献——提 issue 或 PR。
 
 ## 致谢与许可
 
