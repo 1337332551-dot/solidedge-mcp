@@ -168,8 +168,13 @@ MCP server 由 AI 客户端在会话启动时拉起，任何 `mcp.json` 改动�
 **Solid Edge 弹了模态框，AI 会卡死吗？**
 不会：弹窗探针检测到模态框时直接上报框标题和按钮，而不是傻等到超时。
 
+## 项目状态
+
+`se_model_build` 消费的 features JSON——建模中间表示（IR）——还处在**毛坯阶段**：op 覆盖面、默认值、字段名都可能随版本调整。如果你的工作流要依赖它，建议固定 commit 使用，并预期格式变动。来自真实参数化建模用例的反馈尤其有价值——欢迎开 issue 告诉你想建什么、卡在哪。
+
 ## Roadmap
 
+- [ ] 稳定 features IR（v1）
 - [ ] 发布 Release 二进制（不用装 SDK 也能试用）
 - [ ] GitHub Actions CI（push 时自动 build + test）
 - [ ] 更多配方示例（出图自动化、BOM 提取）

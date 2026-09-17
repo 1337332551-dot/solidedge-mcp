@@ -168,8 +168,13 @@ Defense in depth: transport-layer mode gate (readonly/full), member-level guardr
 **The AI hangs when Solid Edge shows a dialog.**
 It doesn't: a popup probe detects modal dialogs and reports their title and buttons instead of blocking until timeout.
 
+## Project status
+
+The feature-spec JSON — the intermediate representation (IR) that `se_model_build` consumes — is still **rough and evolving**: op coverage, defaults and field names may change between versions. If you build workflows on it, pin a commit and expect churn. Feedback from real parametric-modeling use cases is especially valuable — open an issue and tell us what you tried to model.
+
 ## Roadmap
 
+- [ ] Stabilize the feature-spec IR (v1)
 - [ ] Published Release binaries (no SDK needed to try)
 - [ ] GitHub Actions CI (build + test on push)
 - [ ] More recipe examples (drawing automation, BOM extraction)
