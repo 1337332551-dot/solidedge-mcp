@@ -1,0 +1,1013 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using Microsoft.Extensions.AI;
+using ModelContextProtocol.Server;
+using SolidEdgeFramework;
+
+namespace SolidEdge.Spy.McpServer.Tools;
+
+[McpServerToolType]
+public static class GeometryTools
+{
+	private sealed class CaptureMeta
+	{
+		public bool Ok;
+
+		public string ImagePath;
+
+		public int Width;
+
+		public int Height;
+
+		public string OrientationLabel;
+
+		public bool? CameraRestored;
+
+		public string RestoreMethod;
+
+		public string Note;
+
+		public string ErrorMessage;
+
+		public string ToJson()
+		{
+			if (!Ok)
+			{
+				return JsonSerializer.Serialize(new
+				{
+					status = "error",
+					message = ErrorMessage
+				});
+			}
+			return JsonSerializer.Serialize(new
+			{
+				status = "ok",
+				image = ImagePath,
+				width = Width,
+				height = Height,
+				orientation = OrientationLabel,
+				cameraRestored = CameraRestored,
+				restoreMethod = RestoreMethod,
+				note = Note
+			});
+		}
+	}
+
+	private struct RECT
+	{
+		public int Left;
+
+		public int Top;
+
+		public int Right;
+
+		public int Bottom;
+	}
+
+	private static readonly Dictionary<string, int> OrientationMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+	{
+		["current"] = 0,
+		["iso"] = 7,
+		["top"] = 1,
+		["right"] = 2,
+		["left"] = 3,
+		["front"] = 4,
+		["bottom"] = 5,
+		["back"] = 6
+	};
+
+	private const string CameraBackupViewName = "__se_mcp_bak";
+
+	private static int CamType;
+
+	private static double[] CamArgs;
+
+	private const int SW_RESTORE = 9;
+
+	[McpServerTool]
+	[Description("读取模型中对象的定位信息，解决'坐标系心智负担'。返回包围盒/形心/尺寸(mm)/面法向与位置。target 传 obj-N 句柄（特征/Model/RefPlane），或 'refplanes'（扫全部参考面并反推精确法向）/'model'（整个模型）。平面法向用通用梯度法（Profile.Convert3DCoordinate 把世界三轴投影到面上，投影长度≈0 的轴即法向），支持斜平面。坐标单位=米。")]
+	public static string se_read_geometry(SolidEdgeContext context, [Description("要读定位的对象：obj-N 句柄 / 'refplanes' / 'model'")] string target)
+	{
+		try
+		{
+			return context.Invoke(delegate
+			{
+				if (string.Equals(target, "refplanes", StringComparison.OrdinalIgnoreCase))
+				{
+					return ReadAllRefPlanes(context);
+				}
+				if (string.Equals(target, "model", StringComparison.OrdinalIgnoreCase))
+				{
+					return ReadModel(context);
+				}
+				ObjectHandle handle = context.GetHandle(target);
+				return (handle == null || handle.ComObject == null) ? Error("找不到对象 " + target + "（支持 obj-N 句柄 / 'refplanes' / 'model'）。") : ReadObject(context, handle.ComObject, handle.TypeName);
+			});
+		}
+		catch (Exception ex)
+		{
+			return Error("se_read_geometry 失败: " + DescribeException(ex));
+		}
+	}
+
+	private static string ReadAllRefPlanes(SolidEdgeContext context)
+	{
+		object obj = Get(context.GetApplication(), "ActiveDocument");
+		if (obj == null)
+		{
+			return Error("没有活动文档。");
+		}
+		object obj2 = Get(obj, "RefPlanes");
+		int num = Count(obj2);
+		List<object> list = new List<object>();
+		for (int i = 1; i <= num; i++)
+		{
+			object obj3 = Get(obj2, "Item", i);
+			string name = SafeString(Get(obj3, "DisplayName")) ?? "(无名称)";
+			(string, bool, double[], double[]) tuple = ProbePlaneNormal(context, obj3);
+			list.Add(new
+			{
+				index = i,
+				name = name,
+				normalAxis = tuple.Item1,
+				axisAligned = tuple.Item2,
+				origin2d = tuple.Item3,
+				projectedLength = tuple.Item4,
+				hint = ((tuple.Item1 != null) ? (tuple.Item2 ? ("法向沿 " + tuple.Item1 + " 轴（轴对齐平面）") : ("非严格轴对齐（斜平面），法向近似沿 " + tuple.Item1 + " 轴")) : "法向反推失败")
+			});
+		}
+		return JsonSerializer.Serialize(new
+		{
+			status = "ok",
+			target = "refplanes",
+			count = num,
+			refPlanes = list
+		});
+	}
+
+	private static string ReadModel(SolidEdgeContext context)
+	{
+		object obj = Get(context.GetApplication(), "ActiveDocument");
+		if (obj == null)
+		{
+			return Error("没有活动文档。");
+		}
+		object obj2 = Get(obj, "Models");
+		int num = Count(obj2);
+		List<object> list = new List<object>();
+		for (int i = 1; i <= num; i++)
+		{
+			double[] array = TryRangeBox(Get(obj2, "Item", i));
+			list.Add(new
+			{
+				index = i,
+				rangeBox = array,
+				sizeMm = ((array != null) ? Mm(array) : null),
+				centroid = ((array != null) ? Centroid(array) : null)
+			});
+		}
+		return JsonSerializer.Serialize(new
+		{
+			status = "ok",
+			target = "model",
+			modelCount = num,
+			models = list
+		});
+	}
+
+	private static string ReadObject(SolidEdgeContext context, object obj, string typeName)
+	{
+		double[] array = TryRangeBox(obj);
+		int faceCount = -1;
+		try
+		{
+			object obj2 = Get(obj, "Faces", 1);
+			if (obj2 != null)
+			{
+				faceCount = Count(obj2);
+			}
+		}
+		catch
+		{
+		}
+		return JsonSerializer.Serialize(new
+		{
+			status = "ok",
+			target = typeName,
+			rangeBox = array,
+			sizeMm = ((array != null) ? Mm(array) : null),
+			centroid = ((array != null) ? Centroid(array) : null),
+			faceCount = faceCount,
+			note = "坐标单位=米;sizeMm 换算成 UI 显示的毫米。"
+		});
+	}
+
+	private static (string normalAxis, bool axisAligned, double[] origin2d, double[] projectedLength) ProbePlaneNormal(SolidEdgeContext context, object plane)
+	{
+		try
+		{
+			object obj = CreateTempProfile(context, plane);
+			if (obj == null)
+			{
+				return (normalAxis: null, axisAligned: false, origin2d: null, projectedLength: null);
+			}
+			double[] array = Convert3D(obj, 0.0, 0.0, 0.0);
+			double[] a = Convert3D(obj, 1.0, 0.0, 0.0);
+			double[] a2 = Convert3D(obj, 0.0, 1.0, 0.0);
+			double[] a3 = Convert3D(obj, 0.0, 0.0, 1.0);
+			double num = Dist2D(a, array);
+			double num2 = Dist2D(a2, array);
+			double num3 = Dist2D(a3, array);
+			double[] item = new double[3] { num, num2, num3 };
+			double num4 = Math.Min(num, Math.Min(num2, num3));
+			string item2 = ((num4 == num) ? "X" : ((num4 == num2) ? "Y" : "Z"));
+			bool item3 = num4 < 1E-06;
+			TryCloseProfile(obj);
+			return (normalAxis: item2, axisAligned: item3, origin2d: array, projectedLength: item);
+		}
+		catch
+		{
+			return (normalAxis: null, axisAligned: false, origin2d: null, projectedLength: null);
+		}
+	}
+
+	private static object CreateTempProfile(SolidEdgeContext context, object plane)
+	{
+		object obj = Get(context.GetApplication(), "ActiveDocument");
+		if (obj == null)
+		{
+			return null;
+		}
+		return Call(Get(Call(Get(obj, "ProfileSets"), "Add", null), "Profiles"), "Add", new object[1] { plane });
+	}
+
+	private static void TryCloseProfile(object profile)
+	{
+		try
+		{
+			Call(profile, "End", new object[1] { 0 });
+		}
+		catch
+		{
+		}
+	}
+
+	private static double[] Convert3D(object profile, double x, double y, double z)
+	{
+		object[] array = new object[5] { x, y, z, 0.0, 0.0 };
+		ParameterModifier parameterModifier = new ParameterModifier(5);
+		parameterModifier[3] = true;
+		parameterModifier[4] = true;
+		profile.GetType().InvokeMember("Convert3DCoordinate", BindingFlags.InvokeMethod, null, profile, array, new ParameterModifier[1] { parameterModifier }, CultureInfo.InvariantCulture, null);
+		return new double[2]
+		{
+			(double)array[3],
+			(double)array[4]
+		};
+	}
+
+	internal static bool IsOrientationName(string s)
+	{
+		if (!string.IsNullOrWhiteSpace(s))
+		{
+			return OrientationMap.ContainsKey(s.Trim());
+		}
+		return false;
+	}
+
+	[McpServerTool]
+	[Description("把 Solid Edge 当前活动视口截图并【以图片内容直接返回】给多模态 AI 查看(无需 read_file)。orientation 可选 current(默认,不动视角)/iso/top/front/back/left/right/bottom;默认 Fit 满幅,动了视角/缩放后自动还原原相机。支持 3D 文档与工程图 DFT(DFT 走 SheetWindow.Fit+SaveAsImage 路线,orientation/zoom 被忽略,不还原视角)。图片同时落盘到自管理目录(%TEMP%\\se_mcp_captures,LRU 只保留最近50张/100MB,与上一张画面相同则不重复落盘),元数据里给出路径。注意:截图时 SE 主窗口会短暂跳到前台约2秒(不改变最大化状态)。典型用法:建模/改参数后调用本工具目检结果。")]
+	public static List<AIContent> se_capture_viewport(SolidEdgeContext context, [Description("视角:current(默认)/iso/top/front/back/left/right/bottom")] string orientation = "current", [Description("截图前是否 Fit 满幅(默认 true)")] bool fit = true, [Description("Fit 后再 ZoomCamera 的倍率(可选,1 或不传=不缩放)")] double? zoom = null, [Description("落盘原图宽(像素,默认1600)")] int width = 1600, [Description("落盘原图高(像素,默认1200)")] int height = 1200, 	[Description("截图后是否还原原视角(默认 true)")] bool restoreCamera = true, [Description("可选:裁剪区域 \"x,y,w,h\"(0~1 比例,相对整幅;如 \"0.3,0.3,0.4,0.4\" 取中央 40%)。用于放大看局部(某个视图/某个孔位/某段文字),裁剪后就地覆盖落盘图并改写元数据里的宽高")] string region = null)
+	{
+		try
+		{
+			return context.Invoke(() => CaptureViewport(context, orientation, fit, zoom, width, height, restoreCamera, inlineImage: true, null, region));
+		}
+		catch (Exception ex)
+		{
+			return ErrorContent("se_capture_viewport 失败: " + DescribeException(ex));
+		}
+	}
+
+	internal static string CliCaptureViewport(SolidEdgeContext context, string orientation, bool fit, double? zoom, int width, int height, bool restoreCamera, string explicitPath)
+	{
+		try
+		{
+			return context.Invoke(() => CaptureCore(context, orientation, fit, zoom, width, height, restoreCamera, explicitPath).ToJson());
+		}
+		catch (Exception ex)
+		{
+			return Error("CLI 截图失败: " + DescribeException(ex));
+		}
+	}
+
+	private static List<AIContent> CaptureViewport(SolidEdgeContext context, string orientation, bool fit, double? zoom, int width, int height, bool restoreCamera, bool inlineImage, string explicitPath, string region)
+	{
+		//IL_001e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0028: Expected O, but got Unknown
+		//IL_0094: Unknown result type (might be due to invalid IL or missing references)
+		//IL_009e: Expected O, but got Unknown
+		//IL_0051: Unknown result type (might be due to invalid IL or missing references)
+		//IL_005b: Expected O, but got Unknown
+		CaptureMeta captureMeta = CaptureCore(context, orientation, fit, zoom, width, height, restoreCamera, explicitPath);
+		// region 裁剪:先整幅截、再裁 —— 3D 与 DFT 两条路线都适用,不动相机/窗口矩形逻辑
+		if (captureMeta.Ok && !string.IsNullOrWhiteSpace(region) && captureMeta.ImagePath != null)
+		{
+			int croppedWidth;
+			int croppedHeight;
+			string cropError;
+			if (CropToRegion(captureMeta.ImagePath, region, out croppedWidth, out croppedHeight, out cropError))
+			{
+				captureMeta.Width = croppedWidth;
+				captureMeta.Height = croppedHeight;
+				captureMeta.Note = ((captureMeta.Note == null) ? "" : captureMeta.Note + "; ") + "已按 region=" + region + " 裁剪为 " + croppedWidth + "x" + croppedHeight;
+			}
+			else
+			{
+				captureMeta.Note = ((captureMeta.Note == null) ? "" : captureMeta.Note + "; ") + "region 裁剪失败(已返回原图): " + cropError;
+			}
+		}
+		List<AIContent> list = new List<AIContent> { (AIContent)new TextContent(captureMeta.ToJson()) };
+		if (captureMeta.Ok & inlineImage)
+		{
+			try
+			{
+				byte[] array = CaptureStore.DownscaleToPngBytes(captureMeta.ImagePath, 1500);
+				list.Add((AIContent)new DataContent((ReadOnlyMemory<byte>)array, "image/png"));
+			}
+			catch (Exception ex)
+			{
+				list.Add((AIContent)new TextContent("(内嵌图片生成失败:" + ex.Message + ";可用 read_file 读 " + captureMeta.ImagePath + ")"));
+			}
+		}
+		return list;
+	}
+
+	private static CaptureMeta FailMeta(string msg)
+	{
+		return new CaptureMeta
+		{
+			Ok = false,
+			ErrorMessage = msg
+		};
+	}
+
+	private static List<AIContent> ErrorContent(string message)
+	{
+		//IL_0017: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0021: Expected O, but got Unknown
+		return new List<AIContent> { (AIContent)new TextContent(JsonSerializer.Serialize(new
+		{
+			status = "error",
+			message = message
+		})) };
+	}
+
+	private static int ParseOrientation(string orientation)
+	{
+		if (string.IsNullOrWhiteSpace(orientation))
+		{
+			return 0;
+		}
+		string text = orientation.Trim();
+		if (OrientationMap.TryGetValue(text, out var value))
+		{
+			return value;
+		}
+		if (int.TryParse(text, out var result) && result >= 0 && result <= 30)
+		{
+			return result;
+		}
+		throw new ArgumentException("未知视角 \"" + orientation + "\"。可用: current/iso/top/front/back/left/right/bottom");
+	}
+
+	private static CaptureMeta CaptureCore(SolidEdgeContext context, string orientation, bool fit, double? zoom, int width, int height, bool restoreCamera, string explicitPath)
+	{
+		//IL_013a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0370: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00f6: Unknown result type (might be due to invalid IL or missing references)
+		//IL_030e: Unknown result type (might be due to invalid IL or missing references)
+		if (width <= 0 || height <= 0)
+		{
+			return FailMeta("width/height 必须为正数。");
+		}
+		int orientValue;
+		try
+		{
+			orientValue = ParseOrientation(orientation);
+		}
+		catch (ArgumentException ex)
+		{
+			return FailMeta(ex.Message);
+		}
+		object application = context.GetApplication();
+		if (!ManualInvoke.TryInvoke(application, "ActiveWindow", null, out var result, out var error))
+		{
+			return FailMeta("取 ActiveWindow 失败: " + error?.Message);
+		}
+		if (!ManualInvoke.TryInvoke(result, "View", null, out var result2, out var error2))
+		{
+			if (ManualInvoke.TryInvoke(result, "ActiveSheet", null, out var _, out var _))
+			{
+				return CaptureSheetWindow(application, result, orientation, fit, zoom, width, height, explicitPath);
+			}
+			return FailMeta("取 View 失败: " + error2?.Message);
+		}
+		CaptureStore.StartupSweep();
+		bool flag = ((orientValue != 0) | fit) || (zoom.HasValue && Math.Abs(zoom.Value - 1.0) > 1E-09);
+		bool flag2 = false;
+		bool flag3 = false;
+		object result3;
+		Exception error3;
+		if (restoreCamera & flag)
+		{
+			try
+			{
+				((View)result2).SaveCurrentView((object)"__se_mcp_bak");
+				flag2 = true;
+			}
+			catch
+			{
+			}
+			if (!flag2)
+			{
+				flag2 = ManualInvoke.TryInvoke(result2, "SaveCurrentView", new object[1] { "__se_mcp_bak" }, out result3, out error3);
+			}
+			if (!flag2)
+			{
+				try
+				{
+					int camType = default(int);
+					double num = default(double);
+					double num2 = default(double);
+					double num3 = default(double);
+					double num4 = default(double);
+					double num5 = default(double);
+					double num6 = default(double);
+					double num7 = default(double);
+					double num8 = default(double);
+					double num9 = default(double);
+					double num10 = default(double);
+					double num11 = default(double);
+					double num12 = default(double);
+					double num13 = default(double);
+					double num14 = default(double);
+					double num15 = default(double);
+					double num16 = default(double);
+					((View)result2).GetCameraEx(out camType, out num, out num2, out num3, out num4, out num5, out num6, out num7, out num8, out num9, out num10, out num11, out num12, out num13, out num14, out num15, out num16);
+					CamType = camType;
+					CamArgs = new double[16]
+					{
+						num, num2, num3, num4, num5, num6, num7, num8, num9, num10,
+						num11, num12, num13, num14, num15, num16
+					};
+					flag3 = true;
+				}
+				catch
+				{
+				}
+			}
+		}
+		bool flag4 = true;
+		if (orientValue != 0)
+		{
+			flag4 = ManualInvoke.TryInvokeSet(result2, "Orientation", orientValue, out error3);
+		}
+		if (fit)
+		{
+			ManualInvoke.TryInvoke(result2, "Fit", null, out result3, out error3);
+		}
+		if (zoom.HasValue && Math.Abs(zoom.Value - 1.0) > 1E-09)
+		{
+			ManualInvoke.TryInvoke(result2, "ZoomCamera", new object[1] { zoom.Value }, out result3, out error3);
+		}
+		Thread.Sleep(600);
+		string text = ((orientValue == 0) ? "cur" : (OrientationMap.FirstOrDefault((KeyValuePair<string, int> kv) => kv.Value == orientValue).Key ?? orientValue.ToString()));
+		if (int.TryParse(text, out var _))
+		{
+			text = "o" + text;
+		}
+		string text2 = explicitPath;
+		if (string.IsNullOrWhiteSpace(text2))
+		{
+			text2 = CaptureStore.NewFilePath(GetDocNameForFile(application), text);
+		}
+		bool flag5 = TryCaptureWindow(text2, out var width2, out var height2, out var error4);
+		bool? flag6 = null;
+		string restoreMethod = null;
+		if (restoreCamera & flag)
+		{
+			if (flag2)
+			{
+				bool flag7 = false;
+				try
+				{
+					((View)result2).ApplyNamedView((object)"__se_mcp_bak");
+					flag7 = true;
+				}
+				catch
+				{
+					flag7 = false;
+				}
+				if (!flag7)
+				{
+					flag7 = ManualInvoke.TryInvoke(result2, "ApplyNamedView", new object[1] { "__se_mcp_bak" }, out result3, out error3);
+				}
+				if (flag7)
+				{
+					flag6 = true;
+					restoreMethod = "named-view";
+				}
+			}
+			if ((flag6 != true) & flag3)
+			{
+				try
+				{
+					View val = (View)result2;
+					double[] camArgs = CamArgs;
+					val.SetCameraEx(CamType, camArgs[0], camArgs[1], camArgs[2], camArgs[3], camArgs[4], camArgs[5], camArgs[6], camArgs[7], camArgs[8], camArgs[9], camArgs[10], camArgs[11], camArgs[12], camArgs[13], camArgs[14], camArgs[15]);
+					flag6 = true;
+					restoreMethod = "camera-ex";
+				}
+				catch
+				{
+				}
+			}
+			if (flag6 != true)
+			{
+				flag6 = false;
+			}
+		}
+		if (!flag5)
+		{
+			return FailMeta("截图失败: " + error4);
+		}
+		List<string> list = new List<string>();
+		if (!flag4)
+		{
+			list.Add("视角切换失败(IDispatch put 不通),截的是切换前视图");
+		}
+		if (flag6 == false)
+		{
+			list.Add("相机还原失败,named-view 与 camera-ex 均不可用");
+		}
+		if (explicitPath == null)
+		{
+			if (CaptureStore.IsDuplicate(text2))
+			{
+				try
+				{
+					File.Delete(text2);
+				}
+				catch
+				{
+				}
+				list.Add("与上一张画面相同,未重复落盘");
+			}
+			CaptureStore.EnforceRetention();
+		}
+		return new CaptureMeta
+		{
+			Ok = true,
+			ImagePath = text2,
+			Width = width2,
+			Height = height2,
+			OrientationLabel = orientation,
+			CameraRestored = flag6,
+			RestoreMethod = restoreMethod,
+			Note = ((list.Count > 0) ? string.Join("; ", list) : null)
+		};
+	}
+
+	private static string GetDocNameForFile(object app)
+	{
+		try
+		{
+			if (!ManualInvoke.TryInvoke(app, "ActiveDocument", null, out var result, out var error) || result == null)
+			{
+				return "SE";
+			}
+			if (!ManualInvoke.TryInvoke(result, "Name", null, out var result2, out error) || result2 == null)
+			{
+				return "SE";
+			}
+			return result2.ToString();
+		}
+		catch
+		{
+			return "SE";
+		}
+	}
+
+	private static CaptureMeta CaptureSheetWindow(object application, object sheetWindow, string orientation, bool fit, double? zoom, int width, int height, string explicitPath)
+	{
+		List<string> list = new List<string>();
+		if (!string.IsNullOrWhiteSpace(orientation) && !string.Equals(orientation.Trim(), "current", StringComparison.OrdinalIgnoreCase))
+		{
+			list.Add("DFT 为二维视图,orientation \"" + orientation.Trim() + "\" 不适用,已忽略");
+		}
+		if (zoom.HasValue && Math.Abs(zoom.Value - 1.0) > 1E-09)
+		{
+			list.Add("DFT 为二维视图,zoom 不适用,已忽略");
+		}
+		if (fit)
+		{
+			ManualInvoke.TryInvoke(sheetWindow, "Fit", null, out var _, out var _);
+		}
+		Thread.Sleep(600);
+		string text = (string.IsNullOrWhiteSpace(orientation) ? "cur" : orientation.Trim().ToLowerInvariant());
+		if (text == "current")
+		{
+			text = "cur";
+		}
+		string text2 = explicitPath;
+		if (string.IsNullOrWhiteSpace(text2))
+		{
+			text2 = CaptureStore.NewFilePath(GetDocNameForFile(application), text);
+		}
+		string text3 = Path.ChangeExtension(text2, ".bmp");
+		bool flag = string.Equals(Path.GetFullPath(text3), Path.GetFullPath(text2), StringComparison.OrdinalIgnoreCase);
+		if (!ManualInvoke.TryInvoke(sheetWindow, "SaveAsImage", new object[3] { text3, width, height }, out var _, out var error))
+		{
+			return FailMeta("DFT 截图失败(SheetWindow.SaveAsImage): " + error?.Message);
+		}
+		int num = width;
+		int num2 = height;
+		if (!flag)
+		{
+			try
+			{
+				using (Bitmap bitmap = new Bitmap(text3))
+				{
+					num = bitmap.Width;
+					num2 = bitmap.Height;
+					bitmap.Save(text2, ImageFormat.Png);
+				}
+			}
+			catch (Exception ex)
+			{
+				return FailMeta("DFT 图片转存 PNG 失败: " + ex.Message);
+			}
+			finally
+			{
+				try
+				{
+					File.Delete(text3);
+				}
+				catch
+				{
+				}
+			}
+		}
+		else
+		{
+			try
+			{
+				using Bitmap bitmap2 = new Bitmap(text2);
+				num = bitmap2.Width;
+				num2 = bitmap2.Height;
+			}
+			catch
+			{
+			}
+		}
+		if (explicitPath == null)
+		{
+			if (CaptureStore.IsDuplicate(text2))
+			{
+				try
+				{
+					File.Delete(text2);
+				}
+				catch
+				{
+				}
+				list.Add("与上一张画面相同,未重复落盘");
+			}
+			CaptureStore.EnforceRetention();
+		}
+		list.Add("DFT 路线: SheetWindow.Fit + SaveAsImage,无相机概念,不还原视角");
+		return new CaptureMeta
+		{
+			Ok = true,
+			ImagePath = text2,
+			Width = num,
+			Height = num2,
+			OrientationLabel = orientation,
+			CameraRestored = null,
+			RestoreMethod = null,
+			Note = ((list.Count > 0) ? string.Join("; ", list) : null)
+		};
+	}
+
+	/// <summary>
+	/// 按比例裁剪已落盘的截图(region = "x,y,w,h",0~1,相对整幅)。
+	/// 用途:排查"标注飘到哪/某个视图长什么样"时放大局部 —— 比全屏缩略图可靠得多。
+	/// 就地覆盖原图:先写临时文件再替换(Bitmap 仍持有原文件句柄,直接覆盖会失败)。
+	/// </summary>
+	private static bool CropToRegion(string path, string region, out int newWidth, out int newHeight, out string error)
+	{
+		newWidth = 0;
+		newHeight = 0;
+		error = null;
+		string[] parts = region.Split(',');
+		if (parts.Length != 4)
+		{
+			error = "region 需要 4 个数(x,y,w,h),如 \"0.25,0.25,0.5,0.5\"";
+			return false;
+		}
+		double rx, ry, rw, rh;
+		if (!double.TryParse(parts[0].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out rx)
+			|| !double.TryParse(parts[1].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out ry)
+			|| !double.TryParse(parts[2].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out rw)
+			|| !double.TryParse(parts[3].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out rh))
+		{
+			error = "region 里有非数字: \"" + region + "\"";
+			return false;
+		}
+		if (rw <= 0 || rh <= 0)
+		{
+			error = "region 的 w/h 必须大于 0";
+			return false;
+		}
+		if (!File.Exists(path))
+		{
+			error = "截图文件不存在: " + path;
+			return false;
+		}
+		string tempPath = path + ".region.tmp.png";
+		try
+		{
+			int x, y, cw, ch;
+			using (Bitmap source = new Bitmap(path))
+			{
+				x = (int)Math.Round(rx * source.Width);
+				y = (int)Math.Round(ry * source.Height);
+				cw = (int)Math.Round(rw * source.Width);
+				ch = (int)Math.Round(rh * source.Height);
+				if (x < 0) x = 0;
+				if (y < 0) y = 0;
+				if (cw < 1) cw = 1;
+				if (ch < 1) ch = 1;
+				if (x + cw > source.Width) cw = source.Width - x;
+				if (y + ch > source.Height) ch = source.Height - y;
+				if (cw < 1 || ch < 1)
+				{
+					error = "裁剪区域落在图外(算得 " + cw + "x" + ch + ")";
+					return false;
+				}
+				using (Bitmap cropped = source.Clone(new Rectangle(x, y, cw, ch), source.PixelFormat))
+				{
+					cropped.Save(tempPath, ImageFormat.Png);
+				}
+				newWidth = cw;
+				newHeight = ch;
+			}
+			File.Copy(tempPath, path, overwrite: true);
+		}
+		catch (Exception ex)
+		{
+			error = ex.GetType().Name + ": " + ex.Message;
+			return false;
+		}
+		finally
+		{
+			try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+		}
+		return true;
+	}
+
+	private static bool TryCaptureWindow(string path, out int width, out int height, out string error)
+	{
+		width = 0;
+		height = 0;
+		error = null;
+		Process process = Process.GetProcesses().FirstOrDefault((Process p) => p.MainWindowHandle != IntPtr.Zero && (p.MainWindowTitle ?? "").IndexOf("Solid Edge", StringComparison.OrdinalIgnoreCase) >= 0);
+		if (process == null)
+		{
+			error = "找不到 Solid Edge 主窗口（进程/窗口标题）";
+			return false;
+		}
+		try
+		{
+			if (IsIconic(process.MainWindowHandle))
+			{
+				ShowWindow(process.MainWindowHandle, 9);
+			}
+			SetForegroundWindow(process.MainWindowHandle);
+			Thread.Sleep(1200);
+			if (!GetWindowRect(process.MainWindowHandle, out var rect))
+			{
+				error = "GetWindowRect 失败";
+				return false;
+			}
+			// 与窗口所在屏幕的「工作区」求交。
+			// 最大化窗口的 rect 常比工作区四周各大 ~11px（DPI 虚拟化 / 被 DWM 裁掉的边框）：
+			//   · 溢出到屏幕外的一侧 → CopyFromScreen 截出纯黑边
+			//   · 跨屏时溢出到相邻屏幕 → 把邻屏内容截进图里（比黑边更糟）
+			MONITORINFO monitorINFO = default(MONITORINFO);
+			monitorINFO.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+			nint num3 = MonitorFromWindow(process.MainWindowHandle, 2u);
+			if (num3 != IntPtr.Zero && GetMonitorInfo(num3, ref monitorINFO))
+			{
+				rect.Left = Math.Max(rect.Left, monitorINFO.rcWork.Left);
+				rect.Top = Math.Max(rect.Top, monitorINFO.rcWork.Top);
+				rect.Right = Math.Min(rect.Right, monitorINFO.rcWork.Right);
+				rect.Bottom = Math.Min(rect.Bottom, monitorINFO.rcWork.Bottom);
+			}
+			int num = rect.Right - rect.Left;
+			int num2 = rect.Bottom - rect.Top;
+			if (num <= 0 || num2 <= 0)
+			{
+				error = "窗口尺寸无效: " + num + "x" + num2;
+				return false;
+			}
+			using (Bitmap bitmap = new Bitmap(num, num2))
+			{
+				using Graphics graphics = Graphics.FromImage(bitmap);
+				graphics.CopyFromScreen(rect.Left, rect.Top, 0, 0, new Size(num, num2));
+				bitmap.Save(path, ImageFormat.Png);
+			}
+			width = num;
+			height = num2;
+			return true;
+		}
+		catch (Exception ex)
+		{
+			error = ex.Message;
+			return false;
+		}
+		finally
+		{
+			process.Dispose();
+		}
+	}
+
+	[DllImport("user32.dll")]
+	private static extern bool SetForegroundWindow(nint hWnd);
+
+	[DllImport("user32.dll")]
+	private static extern bool ShowWindow(nint hWnd, int nCmdShow);
+
+	[DllImport("user32.dll")]
+	private static extern bool IsIconic(nint hWnd);
+
+	[DllImport("user32.dll")]
+	private static extern nint MonitorFromWindow(nint hwnd, uint dwFlags);
+
+	[DllImport("user32.dll")]
+	private static extern bool GetMonitorInfo(nint hMonitor, ref MONITORINFO lpmi);
+
+	private struct MONITORINFO
+	{
+		public int cbSize;
+
+		public RECT rcMonitor;
+
+		public RECT rcWork;
+
+		public uint dwFlags;
+	}
+
+	[DllImport("user32.dll")]
+	private static extern bool GetWindowRect(nint hWnd, out RECT rect);
+
+	private static object Get(object o, string n)
+	{
+		return InvokeRaw(o, n, null);
+	}
+
+	private static object Get(object o, string n, object a)
+	{
+		return InvokeRaw(o, n, new object[1] { a });
+	}
+
+	private static object Call(object o, string n, object[] a)
+	{
+		return InvokeRaw(o, n, a);
+	}
+
+	private static object InvokeRaw(object o, string n, object[] a)
+	{
+		if (ManualInvoke.TryInvoke(o, n, a ?? Array.Empty<object>(), out var result, out var error))
+		{
+			return result;
+		}
+		throw error ?? new Exception("IDispatch 调用失败: " + n);
+	}
+
+	private static int Count(object c)
+	{
+		try
+		{
+			return Convert.ToInt32(Get(c, "Count"));
+		}
+		catch
+		{
+			return 0;
+		}
+	}
+
+	private static double[] TryRangeBox(object obj)
+	{
+		try
+		{
+			if (Get(obj, "RangeBox") is Array { Length: >=6 } array)
+			{
+				return new double[6]
+				{
+					Convert.ToDouble(array.GetValue(0)),
+					Convert.ToDouble(array.GetValue(1)),
+					Convert.ToDouble(array.GetValue(2)),
+					Convert.ToDouble(array.GetValue(3)),
+					Convert.ToDouble(array.GetValue(4)),
+					Convert.ToDouble(array.GetValue(5))
+				};
+			}
+		}
+		catch
+		{
+		}
+		return null;
+	}
+
+	private static double[] Centroid(double[] rb)
+	{
+		return new double[3]
+		{
+			(rb[0] + rb[3]) / 2.0,
+			(rb[1] + rb[4]) / 2.0,
+			(rb[2] + rb[5]) / 2.0
+		};
+	}
+
+	private static double[] Mm(double[] rb)
+	{
+		return new double[3]
+		{
+			(rb[3] - rb[0]) * 1000.0,
+			(rb[4] - rb[1]) * 1000.0,
+			(rb[5] - rb[2]) * 1000.0
+		};
+	}
+
+	private static double Dist2D(double[] a, double[] b)
+	{
+		return Math.Sqrt(Math.Pow(a[0] - b[0], 2.0) + Math.Pow(a[1] - b[1], 2.0));
+	}
+
+	private static string SafeString(object v)
+	{
+		try
+		{
+			return v?.ToString();
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	private static string DescribeException(Exception ex)
+	{
+		StringBuilder stringBuilder = new StringBuilder();
+		Exception ex2 = ex;
+		int num = 0;
+		while (ex2 != null && num < 3)
+		{
+			if (num > 0)
+			{
+				stringBuilder.Append(" <- 内部: ");
+			}
+			stringBuilder.Append(ex2.GetType().Name);
+			if (!string.IsNullOrEmpty(ex2.Message))
+			{
+				stringBuilder.Append(": ").Append(ex2.Message);
+			}
+			ex2 = ex2.InnerException;
+			num++;
+		}
+		return stringBuilder.ToString();
+	}
+
+	private static string Error(string message)
+	{
+		return JsonSerializer.Serialize(new
+		{
+			status = "error",
+			message = message
+		});
+	}
+}

@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>SolidEdge.Spy.EventMcp</RootNamespace>
+    <AssemblyName>solidedge-event-mcp</AssemblyName>
+    <UseWindowsForms>false</UseWindowsForms>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <!-- MCP 协议 SDK(与执行 MCP 相同) -->
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
+    <!-- Solid Edge 互操作程序集(SolidEdge Community 发布;纯 COM 类型定义,不含任何 Siemens 专有代码) -->
+    <PackageReference Include="Interop.SolidEdge" Version="108.0.0" />
+  </ItemGroup>
+
+  <!-- 共享 COM 互操作源码:与 SolidEdge.Spy.McpServer 共用 src/SolidEdge.Shared 单一数据源(编译期链接,零拷贝)。
+       命名空间保持 SolidEdge.Spy.InteropServices / SolidEdge.Spy.McpServer.Telemetry 原样 -->
+  <ItemGroup>
+    <Compile Include="..\SolidEdge.Shared\GlobalExceptionHandler.cs" Link="Shared\GlobalExceptionHandler.cs" />
+    <Compile Include="..\SolidEdge.Shared\TypeLibGuid.cs" Link="Shared\TypeLibGuid.cs" />
+    <Compile Include="..\SolidEdge.Shared\OleMessageFilter.cs" Link="Shared\OleMessageFilter.cs" />
+
+    <!-- Extensions 中纯逻辑的文件(不依赖 WinForms) -->
+    <Compile Include="..\SolidEdge.Shared\Extensions\IntExtensions.cs" Link="Shared\Extensions\IntExtensions.cs" />
+    <Compile Include="..\SolidEdge.Shared\Extensions\EnumExtensions.cs" Link="Shared\Extensions\EnumExtensions.cs" />
+    <Compile Include="..\SolidEdge.Shared\Extensions\ObjectExtensions.cs" Link="Shared\Extensions\ObjectExtensions.cs" />
+
+    <!-- InteropServices 全套(纯 COM 互操作,无外部依赖) -->
+    <Compile Include="..\SolidEdge.Shared\InteropServices\*.cs" Link="Shared\InteropServices\%(Filename)%(Extension)" />
+
+    <!-- 传输层工具调用计量(与执行 MCP 共享同一份源码;命名空间 SolidEdge.Spy.McpServer.Telemetry) -->
+    <Compile Include="..\SolidEdge.Shared\Telemetry\JsonRpcTap.cs" Link="Shared\Telemetry\JsonRpcTap.cs" />
+    <Compile Include="..\SolidEdge.Shared\Telemetry\ToolUsage.cs" Link="Shared\Telemetry\ToolUsage.cs" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,28 @@
+# Build outputs
+bin/
+obj/
+out/
+publish/
+*.user
+*.suo
+
+# NuGet
+packages/
+*.nupkg
+
+# IDE
+.vs/
+.idea/
+.vscode/
+*.swp
+
+# Local build artifacts (never commit Siemens interop dlls)
+mcp_build/
+Interop.SolidEdge.dll
+SolidEdgeFramework.dll
+SolidEdgeConstants.dll
+SolidEdgePart.dll
+SolidEdgeFrameworkSupport.dll
+
+# Runtime logs / local state
+*.log

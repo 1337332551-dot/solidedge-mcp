@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>SolidEdge.Spy.McpServer</RootNamespace>
+    <AssemblyName>solidedge-mcp</AssemblyName>
+    <UseWindowsForms>false</UseWindowsForms>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <!-- MCP 协议 SDK(微软+Anthropic 官方包) -->
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
+    <!-- MCP SDK 只引用 Hosting 抽象,需要显式加实现包(Host.CreateApplicationBuilder) -->
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
+    <!-- se_capture_viewport 依赖:多模态图片返回(AIContent) + GDI+ 位图处理 -->
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="10.8.3" />
+    <PackageReference Include="System.Drawing.Common" Version="8.0.8" />
+    <!-- Solid Edge 互操作程序集(SolidEdge Community 发布;纯 COM 类型定义,不含任何 Siemens 专有代码)。
+         版本号 108 对应 SE2022 类型库;其他 SE 版本请按本机安装的 SE 调整(见 scripts/gen_interop.ps1 备选方案) -->
+    <PackageReference Include="Interop.SolidEdge" Version="108.0.0" />
+  </ItemGroup>
+
+  <!-- 单元测试工程可访问 internal 成员(Guardrail / ToolRisk / SolidEdgeContext.IsDisconnected 等) -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="SolidEdge.Spy.McpServer.Tests" />
+  </ItemGroup>
+
+  <!-- 共享 COM 互操作源码:与 SolidEdge.Spy.EventMcp 共用 src/SolidEdge.Shared 单一数据源(编译期链接,零拷贝)。
+       命名空间保持 SolidEdge.Spy.InteropServices / SolidEdge.Spy.McpServer.Telemetry 原样,不随目录变化 -->
+  <ItemGroup>
+    <Compile Include="..\SolidEdge.Shared\GlobalExceptionHandler.cs" Link="Shared\GlobalExceptionHandler.cs" />
+    <Compile Include="..\SolidEdge.Shared\TypeLibGuid.cs" Link="Shared\TypeLibGuid.cs" />
+    <Compile Include="..\SolidEdge.Shared\OleMessageFilter.cs" Link="Shared\OleMessageFilter.cs" />
+
+    <!-- Extensions 中纯逻辑的文件(不依赖 WinForms) -->
+    <Compile Include="..\SolidEdge.Shared\Extensions\IntExtensions.cs" Link="Shared\Extensions\IntExtensions.cs" />
+    <Compile Include="..\SolidEdge.Shared\Extensions\EnumExtensions.cs" Link="Shared\Extensions\EnumExtensions.cs" />
+    <Compile Include="..\SolidEdge.Shared\Extensions\ObjectExtensions.cs" Link="Shared\Extensions\ObjectExtensions.cs" />
+
+    <!-- 传输层工具调用计量(JsonRpcTap)与权限洋葱层共用的流 tap 基础设施 -->
+    <Compile Include="..\SolidEdge.Shared\Telemetry\JsonRpcTap.cs" Link="Shared\Telemetry\JsonRpcTap.cs" />
+    <Compile Include="..\SolidEdge.Shared\Telemetry\ToolUsage.cs" Link="Shared\Telemetry\ToolUsage.cs" />
+
+    <!-- InteropServices 全套(IDispatch/TypeLib 反射,纯 COM 互操作,无外部依赖) -->
+    <Compile Include="..\SolidEdge.Shared\InteropServices\*.cs" Link="Shared\InteropServices\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>
