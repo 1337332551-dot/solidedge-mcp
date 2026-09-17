@@ -1,9 +1,0 @@
-<Solution>
-  <Folder Name="/src/">
-    <Project Path="src/SolidEdge.Spy.EventMcp/SolidEdge.Spy.EventMcp.csproj" />
-    <Project Path="src/SolidEdge.Spy.McpServer/SolidEdge.Spy.McpServer.csproj" />
-  </Folder>
-  <Folder Name="/tests/">
-    <Project Path="tests/SolidEdge.Spy.McpServer.Tests/SolidEdge.Spy.McpServer.Tests.csproj" />
-  </Folder>
-</Solution>
