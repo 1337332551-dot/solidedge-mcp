@@ -2,7 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**MCP servers that let AI clients (Claude Desktop, Cursor, Trae, Cline, ...) drive Siemens Solid Edge** — query models, build parametric features, automate drawings, and listen to document events, all through natural conversation.
+**MCP servers that let AI clients drive Siemens Solid Edge** — query models, build parametric features, automate drawings, and listen to document events, all through natural conversation.
+
+Works with Claude Desktop, Cursor, Cline, and Chinese AI coding tools alike: **Trae, CodeBuddy (Tencent), Lingma (Alibaba), Comate (Baidu)** — anything that speaks MCP.
 
 Solid Edge remains the single source of truth: the AI never replaces your CAD workflow, it operates it — like a pair of hands on your running Solid Edge instance.
 
@@ -101,7 +103,7 @@ Point the server at the built binary. Examples:
 }
 ```
 
-**Trae** (`.trae/mcp.json` in your workspace) uses the same shape.
+**Trae / CodeBuddy / Lingma / Comate** — Chinese AI coding IDEs all support MCP with the same JSON shape (Trae reads `.trae/mcp.json` in your workspace; others use their own MCP settings panel).
 
 Start Solid Edge first, then start a new conversation in your client — the server attaches to the running instance automatically.
 

@@ -2,7 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**让 AI 客户端（Claude Desktop、Cursor、Trae、Cline……）直接操作 Siemens Solid Edge 的 MCP server**——通过自然对话查询模型、构建参数化特征、自动化出图、监听文档事件。
+**让 AI 客户端直接操作 Siemens Solid Edge 的 MCP server**——通过自然对话查询模型、构建参数化特征、自动化出图、监听文档事件。
+
+国际客户端（Claude Desktop、Cursor、Cline）和国内 AI 编程工具都可用：**Trae、CodeBuddy（腾讯）、通义灵码（阿里）、文心快码（百度）**——只要支持 MCP 就能接。
 
 Solid Edge 始终是唯一事实源：AI 不替代你的 CAD 工作流，而是操作它——像一双手，搭在你正在运行的 Solid Edge 实例上。
 
@@ -101,7 +103,7 @@ dotnet test tests/SolidEdge.Spy.McpServer.Tests
 }
 ```
 
-**Trae**（工作区 `.trae/mcp.json`）格式相同。
+**Trae / CodeBuddy / 通义灵码 / 文心快码**——国内 AI 编程工具同样走 MCP 配置，JSON 格式相同（Trae 读工作区 `.trae/mcp.json`，其余在各自的 MCP 设置面板里配）。
 
 先启动 Solid Edge，再在客户端开新会话——server 会自动连接正在运行的实例。
 
