@@ -81,6 +81,18 @@ dotnet test tests/SolidEdge.Spy.McpServer.Tests
 
 No Siemens files are needed from you up front: the COM interop assembly comes from the community-published [`Interop.SolidEdge`](https://www.nuget.org/packages/Interop.SolidEdge) NuGet package (pure type definitions, no Siemens proprietary code is distributed in this repo).
 
+> Mainland China users: if nuget.org is slow or unreachable, add a mirror before restoring, e.g. `dotnet nuget add source azure-cn -n azure-cn -s https://nuget.cdn.azure.cn/v3/index.json`, or drop this `nuget.config` next to the `.sln`:
+>
+> ```xml
+> <?xml version="1.0" encoding="utf-8"?>
+> <configuration>
+>   <packageSources>
+>     <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+>     <add key="azure-cn" value="https://nuget.cdn.azure.cn/v3/index.json" />
+>   </packageSources>
+> </configuration>
+> ```
+
 If you prefer building the interop assembly from your own installed Solid Edge (e.g. for a different SE version), use `scripts/gen_interop.ps1` with the .NET Framework `TlbImp.exe` tool and reference the produced DLLs instead.
 
 ## Configure your AI client

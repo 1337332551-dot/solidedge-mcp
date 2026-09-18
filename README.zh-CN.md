@@ -81,6 +81,18 @@ dotnet test tests/SolidEdge.Spy.McpServer.Tests
 
 不需要你提前准备任何 Siemens 文件：COM 互操作程序集来自社区发布的 [`Interop.SolidEdge`](https://www.nuget.org/packages/Interop.SolidEdge) NuGet 包（纯类型定义，本仓库不分发任何 Siemens 专有代码）。
 
+> 国内用户如果 nuget.org 慢或连不上，restore 前先加个镜像源，或在 `.sln` 旁边放一个 `nuget.config`：
+>
+> ```xml
+> <?xml version="1.0" encoding="utf-8"?>
+> <configuration>
+>   <packageSources>
+>     <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+>     <add key="azure-cn" value="https://nuget.cdn.azure.cn/v3/index.json" />
+>   </packageSources>
+> </configuration>
+> ```
+
 如果你想基于本机安装的 Solid Edge 自己生成互操作程序集（例如 SE 版本不同），用 `scripts/gen_interop.ps1`（依赖 .NET Framework 的 `TlbImp.exe`），生成后改为引用产物 DLL。
 
 ## 配置 AI 客户端
