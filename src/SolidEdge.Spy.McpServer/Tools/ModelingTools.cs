@@ -410,7 +410,14 @@ namespace SolidEdge.Spy.McpServer.Tools
             {
                 // 第一个特征:新建实体;AddFiniteExtrudedProtrusion 的返回值就是新 Model
                 // (2026-09-13 实测:此处立刻回读 models.Item(1) 可能返回 null → NRE,必须用返回值)
-                object model = CallStd(models, "AddFiniteExtrudedProtrusion",
+                // 通道必须走 Call(ManualInvoke):裸 InvokeMember(binder 直传数组)对
+                // SAFEARRAY(DISPATCH) 的 ProfileArray 必报 TYPEMISMATCH(0x80020005,
+                // 2026-09-17 三通道对照实测;extrude_rect_profile 配方走 chain 同通道
+                // ~90 次验证成功)。本方法枚举参数
+                // (planeSide) 用 int 传不触发 VT_USERDEFINED 静默 null——那是 Revolve 的
+                // RefAxis 才有的问题,所以这里不能照搬 RevolveOp 的 PIA 方案(PIA 直调实测
+                // 返回僵尸 6311,同日实测)。
+                object model = Call(models, "AddFiniteExtrudedProtrusion",
                     new object[] { 1, new object[] { profile }, side, depth });
                 object extrudes = Get(model, "ExtrudedProtrusions");
                 featObj = Get(extrudes, "Item", 1);
@@ -1064,17 +1071,6 @@ namespace SolidEdge.Spy.McpServer.Tools
         {
             try { return Convert.ToInt32(Get(coll, "Count")); }
             catch { return 0; }
-        }
-
-        /// <summary>
-        /// 标准 binder 方法调用。ManualInvoke 对带 VT_USERDEFINED 参数的方法
-        /// (如 Models.AddFiniteRevolvedProtrusion 的 RefAxis/FeaturePropertyConstants)
-        /// 实测会"成功"返回 null(2026-09-13),导致首特征旋转 NRE——这类调用走本方法。
-        /// </summary>
-        private static object CallStd(object obj, string name, object[] args)
-        {
-            return obj.GetType().InvokeMember(name, BindingFlags.InvokeMethod, null, obj, args,
-                null, CultureInfo.InvariantCulture, null);
         }
 
         /// <summary>写属性(属性名 + 值)。建模 IR 的 autoConstraint/dims 需要(Constraint 等)。</summary>
