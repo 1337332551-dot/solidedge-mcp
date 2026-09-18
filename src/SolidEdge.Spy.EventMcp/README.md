@@ -34,17 +34,18 @@ dotnet build src/SolidEdge.Spy.EventMcp/SolidEdge.Spy.EventMcp.csproj -c Release
     },
     "solidedge-event": {
       "type": "local",
-      "command": ["D:\\github项目\\SolidEdgeSpy\\src\\SolidEdge.Spy.EventMcp\\bin\\Release\\net8.0-windows\\solidedge-event-mcp.exe"]
+      "command": ["D:\\path\\to\\solidedge-mcp\\src\\SolidEdge.Spy.EventMcp\\bin\\Release\\net8.0-windows\\solidedge-event-mcp.exe"]
     }
   }
 }
 ```
 
-## 工具面（3 个）
+## 工具面（4 个）
 
 | 工具 | 作用 |
 |---|---|
 | `se_get_events(seq, limit)` | 增量读取：返回 seq 大于入参的事件 + latestSeq + dropped（溢出计数）。首次传 0 取全部 |
+| `se_wait_event(waitFor, timeoutMs)` | 唯一的阻塞工具：轮询环形缓冲直到任一匹配事件到达（`*`=任意事件，可逗号分隔多个） |
 | `se_event_status()` | 诊断：连接状态 / 当前文档 / 订阅映射 / 缓冲统计 / 过滤器表 |
 | `se_set_event_filter(event, enabled)` | 事件级开关，短名 `SelectSetChanged` 或全名 `ISEDocumentEvents.SelectSetChanged` |
 
