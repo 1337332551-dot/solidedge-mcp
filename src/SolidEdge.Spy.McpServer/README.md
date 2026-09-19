@@ -89,13 +89,23 @@ host 同时挂载两个 server（`solidedge` 执行 + `solidedge-event` 事件�
 
 ## 安全模型（受控网关的核心）
 
+**权限模式（权限洋葱外层，传输层 `tools/call` 门禁）**：MCP 配置的 server 节点设环境变量 `SE_MCP_MODE=readonly|engineer|full`（默认 full）：
+
+| 模式 | 工具面 | 自由调用通道（se_invoke_member / se_invoke_chain） |
+|---|---|---|
+| `readonly` | 只放 12 个 Read 档查询工具，其余档传输层直接拒绝 | 不可用（写工具整体被拦） |
+| `engineer`（机械工程师） | 21 个工具全放 | **只放行 `get` 前缀成员**（`GetXxx` / `get_xxx` 读取类）；建模走 se_model_build / se_extrude_on_face / se_recipe_run |
+| `full` | 21 个工具全放 | 任意成员（Guardrail 分级 + confirm 仍在） |
+
+旧 `SE_MCP_READONLY=1` 兼容映射 readonly；未识别值 fail-closed 按 readonly。改模式需重启 AI 会话（客户端重载 server 才生效）。
+
 护栏分**两套并存机制**，这是当前真实架构，也是已知待办：
 
 1. **通用通道走 `Guardrail` 按成员名静态分级**（不解析参数，invoke 前即可拦截）：
    - `Normal`：只读查询，放行
    - `ModelChanging`：`Add`/`Set`/`Move`/`Replace`/`Clear`/`Update` 等写操作，放行但记审计、提示会触发重算
    - `Destructive`：`Delete`/`Cut`/`Drop`/`Erase`/`Purge`/`Remove*` 等不可逆操作，**默认拒绝，必须显式 `confirm=true`**
-   - 全局只读开关 `SE_MCP_READONLY=1`：开启后一切写操作（含脚本通道）整体拒绝
+   - 全局只读开关：`readonly` 模式下自动开启（旧 `SE_MCP_READONLY=1` 仍兼容），一切写操作（含脚本通道）整体拒绝
 2. **高级写工具各自实现等价保护**（尚未统一收口到 `Guardrail`）：
    - `se_open/close/new_document`：文档追踪表 + `Dirty` 检查 + `confirm` + `AuditLog`
    - `se_close_document`：**只关本会话 `se_open_document` 打开的文档，绝不误关你手动打开的**
@@ -182,7 +192,7 @@ MCP server 是常驻进程，`dotnet build` 复制 exe 时会被文件锁卡住�
 
 ### 5. 编辑模型前先确认可回滚
 
-建模/改参数是 🟡 写操作，建议先在副本或新建文档试，配合 `se_snapshot_diff`/`se_capture_viewport` 目检。全局只读 `SE_MCP_READONLY=1` 可在批量探索阶段整体禁写。
+建模/改参数是 🟡 写操作，建议先在副本或新建文档试，配合 `se_snapshot_diff`/`se_capture_viewport` 目检。批量探索阶段可用 `SE_MCP_MODE=readonly` 整体禁写（只放查询工具）。
 
 ## 关键技术点
 

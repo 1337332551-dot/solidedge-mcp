@@ -54,6 +54,7 @@ Set the `SE_MCP_MODE` environment variable on the server entry in your MCP confi
 | Value | Behavior |
 |---|---|
 | `full` *(default)* | All 21 tools allowed |
+| `engineer` | All 21 tools allowed, but the free-form invoke channel (`se_invoke_member`/`se_invoke_chain`) only accepts read-only members whose name starts with `get` (e.g. `GetVariables`); model via the guarded tools (`se_model_build`/`se_extrude_on_face`/`se_recipe_run`) |
 | `readonly` | Only the 12 query tools; model-changing/session/script calls are rejected at the transport layer with a hint on how to switch back |
 | anything else | Fail-closed: treated as `readonly` |
 
@@ -168,7 +169,7 @@ Tests are pure .NET (no Solid Edge required) and cover parsing, validation rules
 Start Solid Edge first. The server attaches to the running instance automatically and retries on the next tool call — startup never blocks on it.
 
 **A tool call was rejected with "已拒绝 ... SE_MCP_MODE".**
-You are in `readonly` mode and the tool belongs to a write tier. Set `SE_MCP_MODE=full` (or remove the variable) in your MCP config and restart the session.
+You are in a restricted mode: `readonly` blocks write-tier tools entirely; `engineer` only allows `get`-prefixed members on the free-form invoke channel. Set `SE_MCP_MODE=full` (or remove the variable) in your MCP config and restart the session.
 
 **I changed the config but nothing happened.**
 MCP servers are spawned by the AI client when the session starts. Restart the conversation after any `mcp.json` change — tools cached from the old process keep serving until then.

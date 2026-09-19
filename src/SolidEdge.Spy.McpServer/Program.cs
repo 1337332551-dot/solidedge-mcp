@@ -47,8 +47,9 @@ namespace SolidEdge.Spy.McpServer
             // (tap 持有 Console.OpenStandardOutput() 的原始流句柄,不受 SetOut 影响,协议照常写 stdout。)
             Console.SetOut(Console.Error);
 
-            // 权限洋葱外层:模式 × 工具档位。SE_MCP_MODE=readonly|full(只读模式只放 Read 档工具,
-            // 其余档在 tools/call 层拒绝并带切换指路);旧 SE_MCP_READONLY=1 兼容映射 readonly;
+            // 权限洋葱外层:模式 × 工具档位。SE_MCP_MODE=readonly|engineer|full(readonly 只放 Read 档工具,
+            // 其余档在 tools/call 层拒绝并带切换指路;engineer 工具档全放但自由调用通道限 get 前缀成员,见 ToolRisk.CheckMember);
+            // 旧 SE_MCP_READONLY=1 兼容映射 readonly;
             // SE_MCP_MODE 给了未识别值则 fail-closed 按只读。默认 full(与历史行为一致)。
             // 内层成员级护栏(Guardrail)的只读开关随模式联动:readonly 模式下整工具已在外层拦,这里是双保险。
             // ⚠️ 必须 BEFORE builder.Build():SDK 传输层构造后立刻开始读 stdin,请求可能在

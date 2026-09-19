@@ -152,6 +152,62 @@ namespace SolidEdge.Spy.McpServer.Tests
             Assert.Contains("未在权限档位表登记", err);
         }
 
+        // ---------- engineer(机械工程师)模式 ----------
+
+        [Fact]
+        public void Engineer模式_解析与环境变量()
+        {
+            ToolRisk.Configure("engineer", null);
+            Assert.Equal(McpMode.Engineer, ToolRisk.Mode);
+            ToolRisk.Configure("Engineer", null);   // 大小写不敏感
+            Assert.Equal(McpMode.Engineer, ToolRisk.Mode);
+            ToolRisk.Configure("engineerX", null);  // 未识别仍 fail-closed 按只读
+            Assert.Equal(McpMode.ReadOnly, ToolRisk.Mode);
+        }
+
+        [Fact]
+        public void Engineer模式_工具级门禁_全部登记工具放行()
+        {
+            ToolRisk.Configure("engineer", null);
+            foreach (var tool in ToolRisk.RegisteredTools)
+            {
+                Assert.Null(ToolRisk.Check(tool));
+            }
+        }
+
+        [Fact]
+        public void Engineer模式_成员过滤_自由通道只放Get前缀()
+        {
+            ToolRisk.Configure("engineer", null);
+            Assert.Null(ToolRisk.CheckMember("se_invoke_member", "get_variables"));   // 小写 get_ 前缀
+            Assert.Null(ToolRisk.CheckMember("se_invoke_member", "GetVariables"));    // 大写 Get 前缀
+            Assert.Null(ToolRisk.CheckMember("se_invoke_member", "GetRelated"));      // 无下划线的 SE 读取 API
+            Assert.NotNull(ToolRisk.CheckMember("se_invoke_member", "AddFiniteExtrudedProtrusion"));
+            Assert.NotNull(ToolRisk.CheckMember("se_invoke_member", "Item"));
+            Assert.NotNull(ToolRisk.CheckMember("se_invoke_member", "TargetGetInfo"));  // 中缀含 get 不放行,只认前缀
+            Assert.NotNull(ToolRisk.CheckMember("se_invoke_chain", "SetValue"));
+            var err = ToolRisk.CheckMember("se_invoke_member", "Delete");
+            Assert.Contains("get", err);   // 拒绝信息带白名规则指路
+        }
+
+        [Fact]
+        public void Engineer模式_成员过滤_仅作用于自由调用通道()
+        {
+            ToolRisk.Configure("engineer", null);
+            Assert.Null(ToolRisk.CheckMember("se_recipe_run", "Add"));     // 配方走工具级门禁,不做成员过滤
+            Assert.Null(ToolRisk.CheckMember("se_model_build", "Add"));
+            Assert.Null(ToolRisk.CheckMember("se_invoke_member", null));   // 空成员交由 Guardrail 处理
+        }
+
+        [Fact]
+        public void Engineer模式_成员过滤_其他模式不生效()
+        {
+            ToolRisk.Configure("full", null);
+            Assert.Null(ToolRisk.CheckMember("se_invoke_member", "Add"));
+            ToolRisk.Configure(null, "1");
+            Assert.Null(ToolRisk.CheckMember("se_invoke_member", "Add"));   // readonly 下整工具已在工具级拦,成员级不重复生效
+        }
+
         // ---------- PermissionTap(传输层拦截) ----------
 
         [Fact]

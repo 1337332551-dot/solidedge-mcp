@@ -54,6 +54,7 @@ Solid Edge 始终是唯一事实源：AI 不替代你的 CAD 工作流，而是�
 | 值 | 行为 |
 |---|---|
 | `full`（默认） | 21 个工具全放行 |
+| `engineer`（机械工程师） | 工具全放行；但自由调用通道（`se_invoke_member`/`se_invoke_chain`）只放行 `get` 前缀的读取类成员（`GetXxx`/`get_xxx`），建模走 `se_model_build`/`se_extrude_on_face`/`se_recipe_run` |
 | `readonly` | 只放行 12 个查询工具；建模/会话/脚本类调用在传输层直接拒绝，并提示如何切回 |
 | 其他任意值 | fail-closed，按 `readonly` 处理 |
 
@@ -168,7 +169,7 @@ dotnet test tests/SolidEdge.Spy.McpServer.Tests
 先启动 Solid Edge。server 会自动连接运行中的实例，连不上也不阻塞启动，下次工具调用时重试。
 
 **工具调用被拒绝，提示"已拒绝 ... SE_MCP_MODE"？**
-当前处于 readonly 模式，该工具属于写档位。在 MCP 配置里把 `SE_MCP_MODE` 改为 `full`（或删掉该变量）后重启会话。
+当前处于受限模式。`readonly` 模式下写档位工具整体被拦；`engineer` 模式下自由调用只放 `get` 前缀成员。在 MCP 配置里把 `SE_MCP_MODE` 改为 `full`（或删掉该变量）后重启会话。
 
 **改了配置但没生效？**
 MCP server 由 AI 客户端在会话启动时拉起，任何 `mcp.json` 改动都需要重启会话——旧进程缓存的工具会一直服务到那时。

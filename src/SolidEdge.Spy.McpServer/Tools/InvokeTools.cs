@@ -65,6 +65,12 @@ public static class InvokeTools
 					{
 						if (stepElem.TryGetProperty("member", out var memberElem) && memberElem.ValueKind == JsonValueKind.String)
 						{
+							string memberFilter = ToolRisk.CheckMember("se_invoke_chain", memberElem.GetString());
+							if (memberFilter != null)
+							{
+								AuditLog.Write("se_invoke_chain", objectId, memberElem.GetString(), false, null, InvocationRisk.Normal, false, "blocked by engineer member filter");
+								return Error(memberFilter);
+							}
 							InvocationRisk stepRisk = Guardrail.Classify(memberElem.GetString(), false);
 							if (stepRisk > chainRisk)
 							{
@@ -423,6 +429,12 @@ public static class InvokeTools
 				{
 					AuditLog.Write("se_invoke_member", objectId, member, propertySet, AuditLog.SummarizeArgs(args), risk, false, "blocked by guardrail");
 					return Error(guard);
+				}
+				string memberFilter = ToolRisk.CheckMember("se_invoke_member", member);
+				if (memberFilter != null)
+				{
+					AuditLog.Write("se_invoke_member", objectId, member, propertySet, AuditLog.SummarizeArgs(args), InvocationRisk.Normal, false, "blocked by engineer member filter");
+					return Error(memberFilter);
 				}
 				if (risk != InvocationRisk.Normal)
 				{

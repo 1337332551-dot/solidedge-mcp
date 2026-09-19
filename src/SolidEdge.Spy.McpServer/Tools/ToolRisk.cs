@@ -3,11 +3,12 @@ using System.Collections.Generic;
 
 namespace SolidEdge.Spy.McpServer.Tools;
 
-/// <summary>权限模式:readonly=只放 Read 档;full=全放。</summary>
+/// <summary>权限模式:readonly=只放 Read 档;engineer=工具档全放但自由调用通道限 get 前缀成员;full=全放。</summary>
 internal enum McpMode
 {
 	ReadOnly = 0,
-	Full = 1
+	Full = 1,
+	Engineer = 2
 }
 
 /// <summary>工具风险档位(洋葱外层,按整个工具粒度;成员级分级在内层 Guardrail)。</summary>
@@ -28,8 +29,9 @@ internal enum RiskTier
 
 /// <summary>
 /// 权限洋葱外层:工具名 → 风险档位 的静态登记表 + 模式门禁。
-/// - 两种模式:readonly(只放 Read 档)/ full(全放)。模式由环境变量决定,进程启动时 Configure 一次:
-///   SE_MCP_MODE=readonly|full;旧 SE_MCP_READONLY=1 兼容映射 readonly;SE_MCP_MODE 给了未识别值则 fail-closed 按只读。
+/// - 三种模式:readonly(只放 Read 档)/ engineer(机械工程师:工具档全放,自由调用通道限 get 前缀成员)/ full(全放)。
+///   模式由环境变量决定,进程启动时 Configure 一次:
+///   SE_MCP_MODE=readonly|engineer|full;旧 SE_MCP_READONLY=1 兼容映射 readonly;SE_MCP_MODE 给了未识别值则 fail-closed 按只读。
 /// - fail-closed:未登记的工具名一律拒绝(防新工具漏登记直接裸奔)。
 /// - 被禁工具仍留在 tools/list 里,拒绝发生在 tools/call,拒绝信息带切换指路(改环境变量+重启会话)。
 /// - 与内层 Guardrail 的分工:这里管"整个工具能不能调",Guardrail 管"成员级风险分级+confirm"。
@@ -102,8 +104,35 @@ internal static class ToolRisk
 		{
 			return null;
 		}
+		if (Mode == McpMode.Engineer)
+		{
+			return null;
+		}
 		return "已拒绝:当前处于只读模式(SE_MCP_MODE=readonly),工具 " + tool + " 属于" + DescribeTier(tier.Value)
 			+ "。只读模式只放行查询类工具。如需放开,请把 MCP 配置里的环境变量 SE_MCP_MODE 改为 full(或删除该变量)后重启会话重载 MCP server。";
+	}
+
+	/// <summary>
+	/// engineer 模式的成员级白名单:仅对自由调用通道(se_invoke_member/se_invoke_chain)生效,
+	/// 成员名须以 "get" 开头(忽略大小写,覆盖 GetXxx / get_xxx 两类 SE 读取 API);
+	/// 其余模式/其余工具一律放行(返回 null)。
+	/// 配方(se_recipe_run)内部步骤不在此过滤——配方是预审过的打包件,走工具级门禁。
+	/// </summary>
+	internal static string CheckMember(string tool, string member)
+	{
+		if (Mode != McpMode.Engineer || member == null)
+		{
+			return null;
+		}
+		if (tool != "se_invoke_member" && tool != "se_invoke_chain")
+		{
+			return null;
+		}
+		if (member.TrimStart().StartsWith("get", StringComparison.OrdinalIgnoreCase))
+		{
+			return null;
+		}
+		return "已拒绝:机械工程师模式下," + tool + " 只允许调用名字以 \"get\" 开头的读取类成员,'" + member.Trim() + "' 不符合。建模请走 se_model_build / se_extrude_on_face / se_recipe_run,探索请走 se_walk_object / se_describe_object;如需任意成员调用,请把 MCP 配置里 SE_MCP_MODE 改为 full 后重启会话重载。";
 	}
 
 	internal static string DescribeTier(RiskTier tier)
@@ -135,13 +164,18 @@ internal static class ToolRisk
 				Mode = McpMode.ReadOnly;
 				return "readonly (env SE_MCP_MODE=readonly)";
 			}
+			if (m.Equals("engineer", StringComparison.OrdinalIgnoreCase))
+			{
+				Mode = McpMode.Engineer;
+				return "engineer (env SE_MCP_MODE=engineer)";
+			}
 			if (m.Equals("full", StringComparison.OrdinalIgnoreCase))
 			{
 				Mode = McpMode.Full;
 				return "full (env SE_MCP_MODE=full)";
 			}
 			Mode = McpMode.ReadOnly;
-			return "readonly (fail-closed: SE_MCP_MODE='" + m + "' 未识别,只认 readonly|full)";
+			return "readonly (fail-closed: SE_MCP_MODE='" + m + "' 未识别,只认 readonly|engineer|full)";
 		}
 		bool legacy = !string.IsNullOrWhiteSpace(legacyReadOnlyEnv)
 			&& (legacyReadOnlyEnv == "1" || legacyReadOnlyEnv.Equals("true", StringComparison.OrdinalIgnoreCase));

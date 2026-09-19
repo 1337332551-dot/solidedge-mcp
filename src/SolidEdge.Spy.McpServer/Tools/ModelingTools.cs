@@ -578,8 +578,24 @@ namespace SolidEdge.Spy.McpServer.Tools
             }
             else
             {
-                featObj = Call(revolves, "AddFinite",
-                    new object[] { profile, refAxis, profileSide, planeSide, angle });
+                // ★ 2026-09-18 修复:后续旋转特征原走 late binding(Call),对 VT_USERDEFINED(RefAxis)
+                //   静默 null / SAFEARRAY(DISPATCH) 报 TYPEMISMATCH——与首特征分支同款坑。
+                //   改为 PIA 强类型;集合级签名 AddFinite(Profile, RefAxis, ProfileSide,
+                //   ProfilePlaneSide, Angle)(编译器实证,与 Models 级 count+数组 风格不同)。
+                var profileTyped = (SolidEdgePart.Profile)profile;
+                var refAxisTyped = (SolidEdgePart.RefAxis)refAxis;
+                var sideProfile = (SolidEdgePart.FeaturePropertyConstants)profileSide;
+                var sidePlane = (SolidEdgePart.FeaturePropertyConstants)planeSide;
+                if (isRevolveCut)
+                {
+                    var cutoutsTyped = (SolidEdgePart.RevolvedCutouts)revolves;
+                    featObj = cutoutsTyped.AddFinite(profileTyped, refAxisTyped, sideProfile, sidePlane, angle);
+                }
+                else
+                {
+                    var revsTyped = (SolidEdgePart.RevolvedProtrusions)revolves;
+                    featObj = revsTyped.AddFinite(profileTyped, refAxisTyped, sideProfile, sidePlane, angle);
+                }
             }
 
             string kindOverride = isRevolveCut ? "RevolvedCutout" : "RevolvedProtrusion";
