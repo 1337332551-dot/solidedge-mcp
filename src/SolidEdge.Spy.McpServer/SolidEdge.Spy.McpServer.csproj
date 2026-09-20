@@ -12,6 +12,17 @@
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
 
+  <!-- P0-1:构建时间戳注入(每次 build 刷新),供 version 参数/启动日志识别部署的是否新构建 -->
+  <PropertyGroup>
+    <BuildTime>$([System.DateTime]::Now.ToString("yyyy-MM-dd HH:mm:ss"))</BuildTime>
+  </PropertyGroup>
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>BuildTime</_Parameter1>
+      <_Parameter2>$(BuildTime)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
   <!-- MCP 协议 SDK(微软+Anthropic 官方包) -->
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
@@ -45,6 +56,7 @@
     <!-- 传输层工具调用计量(JsonRpcTap)与权限洋葱层共用的流 tap 基础设施 -->
     <Compile Include="..\SolidEdge.Shared\Telemetry\JsonRpcTap.cs" Link="Shared\Telemetry\JsonRpcTap.cs" />
     <Compile Include="..\SolidEdge.Shared\Telemetry\ToolUsage.cs" Link="Shared\Telemetry\ToolUsage.cs" />
+    <Compile Include="..\SolidEdge.Shared\Telemetry\BuildInfo.cs" Link="Shared\Telemetry\BuildInfo.cs" />
 
     <!-- InteropServices 全套(IDispatch/TypeLib 反射,纯 COM 互操作,无外部依赖) -->
     <Compile Include="..\SolidEdge.Shared\InteropServices\*.cs" Link="Shared\InteropServices\%(Filename)%(Extension)" />

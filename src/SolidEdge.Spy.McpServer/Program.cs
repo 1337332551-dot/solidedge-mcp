@@ -25,6 +25,13 @@ namespace SolidEdge.Spy.McpServer
             // 这样不依赖 MCP 客户端也能直接查询 Solid Edge,便于调试和复用。
             // 注意:async Task Main 的入口线程不保证是 STA,而 Solid Edge COM 需要 STA,
             // 所以 CLI 逻辑必须在显式创建的 STA 线程上执行。
+            // --version:打印构建时间戳后退出(P0-1:防"改了代码但跑的仍是旧二进制"的假部署)
+            if (args != null && Array.Exists(args, a => a == "--version" || a == "-v"))
+            {
+                Console.WriteLine(SolidEdge.Spy.McpServer.Telemetry.BuildInfo.Describe("solidedge-mcp"));
+                return;
+            }
+
             if (args != null && args.Length > 0)
             {
                 int code = 1;
@@ -46,6 +53,7 @@ namespace SolidEdge.Spy.McpServer
             // 必须手动把 Console.Out 指向 stderr,否则宿主日志会混进 stdout 的 MCP 协议通道。
             // (tap 持有 Console.OpenStandardOutput() 的原始流句柄,不受 SetOut 影响,协议照常写 stdout。)
             Console.SetOut(Console.Error);
+            Console.Error.WriteLine(SolidEdge.Spy.McpServer.Telemetry.BuildInfo.Describe("solidedge-mcp"));
 
             // 权限洋葱外层:模式 × 工具档位。SE_MCP_MODE=readonly|engineer|full(readonly 只放 Read 档工具,
             // 其余档在 tools/call 层拒绝并带切换指路;engineer 工具档全放但自由调用通道限 get 前缀成员,见 ToolRisk.CheckMember);

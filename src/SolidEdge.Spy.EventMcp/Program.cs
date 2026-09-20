@@ -1,8 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using SolidEdge.Spy.InteropServices;
+using SolidEdge.Spy.McpServer.Telemetry;
+using SolidEdgeFramework;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -27,6 +31,11 @@ namespace SolidEdge.Spy.EventMcp
         {
             if (args != null && args.Length > 0)
             {
+                if (args[0] == "--version" || args[0] == "-v")
+                {
+                    Console.WriteLine(BuildInfo.Describe("solidedge-event-mcp"));
+                    return 0;
+                }
                 return RunCli(args);
             }
             await RunServerAsync();
@@ -40,6 +49,7 @@ namespace SolidEdge.Spy.EventMcp
             // ⚠️ 走自定义流传输后,SDK 不再代管 Console 改道,必须把 Console.Out 指向 stderr,
             // 否则宿主日志会混进 stdout 的 MCP 协议通道(协议只允许 JSON-RPC)。
             Console.SetOut(Console.Error);
+            Console.Error.WriteLine(BuildInfo.Describe("solidedge-event-mcp"));
 
             var builder = Host.CreateApplicationBuilder();
 
@@ -86,6 +96,11 @@ namespace SolidEdge.Spy.EventMcp
             {
                 PrintUsage();
                 return 0;
+            }
+
+            if (args[0].Equals("--cleanup", StringComparison.OrdinalIgnoreCase))
+            {
+                return RunCleanup();
             }
 
             if (!args[0].Equals("--listen", StringComparison.OrdinalIgnoreCase))
@@ -176,11 +191,65 @@ namespace SolidEdge.Spy.EventMcp
             return 0;
         }
 
+        /// <summary>
+        /// CLI 僵尸订阅清理:枚举 SE 各事件接口连接点的现有 sink,QI 探活后
+        /// Unadvise 死 sink(前次进程被强杀残留,会卡死"另存为"等同步弹窗)。
+        /// </summary>
+        private static int RunCleanup()
+        {
+            int code = 1;
+            var t = new Thread(() =>
+            {
+                try
+                {
+                    ComPtr pApp = IntPtr.Zero;
+                    if (!MarshalEx.Succeeded(MarshalEx.GetActiveObject("SolidEdge.Application", out pApp)))
+                    {
+                        Console.WriteLine("未找到运行中的 Solid Edge,无需清理。");
+                        code = 0;
+                        return;
+                    }
+                    Application app = pApp.TryGetUniqueRCW<Application>();
+                    try
+                    {
+                        var results = SubscriptionManager.SweepZombies(app);
+                        Console.WriteLine("=== 僵尸订阅清理 ===");
+                        int total = 0, deadTotal = 0;
+                        foreach (var r in results)
+                        {
+                            Console.WriteLine(" " + r.Interface.PadRight(30) +
+                                " 现有 sink=" + r.Total + ",清理死 sink=" + r.Dead);
+                            total += r.Total;
+                            deadTotal += r.Dead;
+                        }
+                        Console.WriteLine(deadTotal > 0
+                            ? "已清理 " + deadTotal + "/" + total + " 个死订阅,SE 弹窗应恢复正常。"
+                            : "没有发现死订阅(共 " + total + " 个活 sink 全部健康)。");
+                        code = 0;
+                    }
+                    finally
+                    {
+                        if (app != null) Marshal.ReleaseComObject(app);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("清理失败: " + ex.Message);
+                }
+            });
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+            t.Join();
+            return code;
+        }
+
         private static void PrintUsage()
         {
             Console.WriteLine("用法:");
             Console.WriteLine("  solidedge-event-mcp.exe                MCP server 模式(stdio,由 AI 客户端拉起)");
             Console.WriteLine("  solidedge-event-mcp.exe --listen [秒]  CLI 自测模式(默认 60 秒;0=持续,Ctrl+C 退出)");
+            Console.WriteLine("  solidedge-event-mcp.exe --cleanup      清理僵尸事件订阅(修 SE 弹窗卡死,如另存为)");
+            Console.WriteLine("  solidedge-event-mcp.exe --version      打印构建时间戳");
             Console.WriteLine("  solidedge-event-mcp.exe --help         本帮助");
         }
     }

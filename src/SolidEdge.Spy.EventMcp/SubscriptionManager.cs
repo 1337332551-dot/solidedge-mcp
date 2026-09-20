@@ -53,7 +53,8 @@ namespace SolidEdge.Spy.EventMcp
         //   Models.Item(1).ModelRecomputeEvents:仅零件文档
         //   AssemblyRecomputeEvents:仅装配文档(直属性)
         // ISEAssemblyFamilyEvents 按用户决定不订(无装配族场景,2026-08-21)。
-        private readonly List<Target> _targets = new List<Target>
+        // 静态:配置不变,僵尸清理是静态方法,无实例也能用(CLI --cleanup)
+        private static readonly List<Target> _targets = new List<Target>
         {
             new Target { Id = new Guid("0ea0d1f1-a199-11d1-aecc-08003616ce02"), Name = "ISEDocumentEvents",
                 AppProps = new string[0], DocProps = new string[] { "DocumentEvents" }, DocumentLevel = true },
@@ -83,9 +84,57 @@ namespace SolidEdge.Spy.EventMcp
             return _status;
         }
 
-        /// <summary>全量订阅(首次连接 / SE 重启重连后调用)。</summary>
+        /// <summary>僵尸订阅清理结果(暴露给 CLI --cleanup)。</summary>
+        public sealed class SweepResult
+        {
+            public string Interface;
+            public int Total;
+            public int Dead;
+        }
+
+        /// <summary>
+        /// 僵尸订阅清理(静态,供 SubscribeAll 前置与 CLI --cleanup 共用):
+        /// 前次 EventMcp 进程被强杀(客户端关闭/任务管理器)时来不及 Unadvise,
+        /// SE 的连接点里留下悬空 sink;SE 弹同步对话框(如"另存为")时回调这些死
+        /// sink 导致对话框卡死(§5.8)。这里逐接口枚举现有 sink 并 QI 探活,
+        /// 只摘除死的,不碰任何活订阅(含其他存活插件的)。
+        /// </summary>
+        public static List<SweepResult> SweepZombies(Application app)
+        {
+            var report = new List<SweepResult>();
+            if (app == null) return report;
+
+            object doc = null;
+            try { doc = app.ActiveDocument; } catch { }
+
+            foreach (Target t in _targets)
+            {
+                int total = 0, dead = 0;
+                Tuple<int, int> r = ConnectionPointHelper.SweepDeadSinks(app, t.Id);
+                if (r != null) { total += r.Item1; dead += r.Item2; }
+                if (doc != null)
+                {
+                    r = ConnectionPointHelper.SweepDeadSinks(doc, t.Id);
+                    if (r != null) { total += r.Item1; dead += r.Item2; }
+                }
+                report.Add(new SweepResult { Interface = t.Name, Total = total, Dead = dead });
+            }
+            return report;
+        }
+
+        /// <summary>全量订阅(首次连接 / SE 重启重连后调用)。订阅前先清僵尸订阅。</summary>
         public void SubscribeAll(Application app)
         {
+            int swept = 0;
+            foreach (SweepResult r in SweepZombies(app))
+            {
+                swept += r.Dead;
+            }
+            if (swept > 0)
+            {
+                _hub.RecordSynthetic("ZombiesSwept", "已清理 " + swept + " 个僵尸事件订阅(前次进程异常退出残留,会导致 SE 弹窗卡死)");
+            }
+
             object doc = GetActiveDocument(app);
             List<Guid> appCps = ConnectionPointHelper.EnumConnectionPoints(app);
             List<Guid> docCps = doc != null ? ConnectionPointHelper.EnumConnectionPoints(doc) : null;
@@ -104,6 +153,13 @@ namespace SolidEdge.Spy.EventMcp
         /// </summary>
         public void RescanDocument(Application app)
         {
+            // 新活动文档的连接点可能挂着前次进程残留的僵尸 sink(文档一直开着时),先清
+            object activeDoc = GetActiveDocument(app);
+            foreach (Target t in _targets)
+            {
+                if (t.DocumentLevel) ConnectionPointHelper.SweepDeadSinks(activeDoc, t.Id);
+            }
+
             for (int i = _subs.Count - 1; i >= 0; i--)
             {
                 if (_subs[i].DocumentLevel)

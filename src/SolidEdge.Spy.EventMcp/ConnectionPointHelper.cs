@@ -99,6 +99,109 @@ namespace SolidEdge.Spy.EventMcp
             }
         }
 
+        /// <summary>
+        /// 僵尸订阅清理:枚举 source 上 iid 连接点的现有 sink,逐个对事件 IID 做
+        /// QueryInterface——QI 自定义接口必须转发到 sink 所在进程,进程已死则立即失败
+        /// (活 sink 零副作用,不会被误伤)。死 sink Unadvise 摘除。
+        /// 返回 (现有 sink 总数, 清理数);宿主不支持该连接点返回 null。
+        /// </summary>
+        public static System.Tuple<int, int> SweepDeadSinks(object source, Guid iid)
+        {
+            if (source == null) return null;
+            IConnectionPointContainer container = source as IConnectionPointContainer;
+            if (container == null) return null;
+
+            Guid target = iid;
+            IConnectionPoint cp;
+            try
+            {
+                container.FindConnectionPoint(ref target, out cp);
+            }
+            catch
+            {
+                return null;
+            }
+            if (cp == null) return null;
+
+            int total = 0;
+            int dead = 0;
+            try
+            {
+                IEnumConnections enumerator;
+                cp.EnumConnections(out enumerator);
+                if (enumerator == null) return System.Tuple.Create(0, 0);
+
+                // 先快照再清理:Unadvise 会改连接点列表,边枚举边删不可靠
+                var items = new System.Collections.Generic.List<CONNECTDATA>();
+                try
+                {
+                    var buffer = new CONNECTDATA[1];
+                    // Next 返回 S_OK(0) 表示取到元素;S_FALSE(1) 表示枚举结束
+                    while (enumerator.Next(1, buffer, IntPtr.Zero) == 0)
+                    {
+                        if (buffer[0].pUnk != null)
+                        {
+                            items.Add(buffer[0]);
+                        }
+                        buffer[0] = default(CONNECTDATA);
+                    }
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(enumerator);
+                }
+
+                foreach (CONNECTDATA cd in items)
+                {
+                    total++;
+                    // .NET 8 里 CONNECTDATA.pUnk 是 object(RCW 包装的 IUnknown):
+                    // 先取回 IUnknown 指针,再对事件 IID 做 QI 探活。RCW 已断开(宿主进程死)
+                    // 时 GetIUnknownForObject 抛异常,同样判死。
+                    bool deadSink = false;
+                    IntPtr pUnk = IntPtr.Zero;
+                    try
+                    {
+                        pUnk = Marshal.GetIUnknownForObject(cd.pUnk);
+                        IntPtr ppv;
+                        int hr = Marshal.QueryInterface(pUnk, ref target, out ppv);
+                        if (hr >= 0)
+                        {
+                            Marshal.Release(ppv);
+                        }
+                        else
+                        {
+                            deadSink = true;
+                        }
+                    }
+                    catch
+                    {
+                        deadSink = true;
+                    }
+                    finally
+                    {
+                        if (pUnk != IntPtr.Zero) Marshal.Release(pUnk);
+                    }
+                    if (deadSink)
+                    {
+                        try { cp.Unadvise(cd.dwCookie); dead++; }
+                        catch { }
+                        try { Marshal.ReleaseComObject(cd.pUnk); }
+                        catch { }
+                    }
+                }
+            }
+            catch
+            {
+                // 尽力而为:清理失败不影响主流程
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(cp);
+            }
+
+            return System.Tuple.Create(total, dead);
+        }
+
         /// <summary>按接口 IID 取消订阅(尽力而为,SE 关闭等场景失败不抛)。</summary>
         public static void Unadvise(object source, Guid eventInterfaceId, int cookie)
         {

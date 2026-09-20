@@ -341,6 +341,11 @@ internal sealed class JsonRpcTap : Stream
 			{
 				err = (codeEl.ValueKind == JsonValueKind.Number) ? codeEl.ToString() : null;
 			}
+			JsonElement protoMsgEl;
+			if (errorEl.TryGetProperty("message", out protoMsgEl) && protoMsgEl.ValueKind == JsonValueKind.String)
+			{
+				err = (err == null ? "protocol" : err) + ":" + TruncateMessage(protoMsgEl.GetString());
+			}
 			if (err == null)
 			{
 				err = "protocol";
@@ -355,7 +360,7 @@ internal sealed class JsonRpcTap : Stream
 				if (resultEl.TryGetProperty("isError", out isErrEl) && isErrEl.ValueKind == JsonValueKind.True)
 				{
 					ok = false;
-					err = "toolError";
+					err = "toolError:" + TruncateMessage(FirstContentText(resultEl));
 				}
 				else
 				{
@@ -365,7 +370,7 @@ internal sealed class JsonRpcTap : Stream
 					if (text != null && text.IndexOf("\"status\":\"error\"", StringComparison.Ordinal) >= 0)
 					{
 						ok = false;
-						err = "toolStatusError";
+						err = "toolStatusError:" + TruncateMessage(ExtractErrorMessage(text));
 					}
 				}
 			}
@@ -394,6 +399,35 @@ internal sealed class JsonRpcTap : Stream
 		catch
 		{
 		}
+	}
+
+	/// <summary>截断错误消息到 100 字符并压平换行(保持 JSONL 单行)。</summary>
+	private static string TruncateMessage(string s)
+	{
+		if (string.IsNullOrEmpty(s))
+		{
+			return "";
+		}
+		s = s.Replace('\r', ' ').Replace('\n', ' ');
+		return s.Length > 100 ? s.Substring(0, 100) : s;
+	}
+
+	/// <summary>从业务错误文本({"status":"error","message":"..."})提取 message;非 JSON 时返回原文。</summary>
+	private static string ExtractErrorMessage(string text)
+	{
+		try
+		{
+			using JsonDocument doc = JsonDocument.Parse(text);
+			if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+				doc.RootElement.TryGetProperty("message", out JsonElement m) && m.ValueKind == JsonValueKind.String)
+			{
+				return m.GetString();
+			}
+		}
+		catch
+		{
+		}
+		return text;
 	}
 
 	/// <summary>取 result.content 里第一个 text 块的内容(用于识别被包装成正常结果的业务错误)。</summary>
