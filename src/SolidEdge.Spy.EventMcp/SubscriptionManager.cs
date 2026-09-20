@@ -53,7 +53,10 @@ namespace SolidEdge.Spy.EventMcp
         //   Models.Item(1).ModelRecomputeEvents:仅零件文档
         //   AssemblyRecomputeEvents:仅装配文档(直属性)
         // ISEAssemblyFamilyEvents 按用户决定不订(无装配族场景,2026-08-21)。
-        // 静态:配置不变,僵尸清理是静态方法,无实例也能用(CLI --cleanup)
+        // ⚠️ ISEFileUIEvents 有意不订(2026-09-20):OnFileSaveAsUI 挂在"另存为"弹窗的
+        // 同步调用路径上,event-mcp 泵线程忙(跑脚本/重扫)时 SE 的文件对话框被阻塞,
+        // 即用户实测的"event mcp 阻止打开另存为窗口"。文件 UI 事件仅作日志,不订不影响
+        // 设计事件感知;若将来要恢复,把下面 ISEFileUIEvents 条目加回并自担弹窗阻塞风险。
         private static readonly List<Target> _targets = new List<Target>
         {
             new Target { Id = new Guid("0ea0d1f1-a199-11d1-aecc-08003616ce02"), Name = "ISEDocumentEvents",
@@ -62,8 +65,6 @@ namespace SolidEdge.Spy.EventMcp
                 AppProps = new string[0], DocProps = new string[] { "Models.Item(1).ModelRecomputeEvents" }, DocumentLevel = true },
             new Target { Id = new Guid("f865f7bd-8d49-11d3-a3e6-0004ac969a5d"), Name = "ISEAssemblyRecomputeEvents",
                 AppProps = new string[0], DocProps = new string[] { "AssemblyRecomputeEvents", "Models.Item(1).AssemblyRecomputeEvents" }, DocumentLevel = true },
-            new Target { Id = new Guid("ecc667a1-a4aa-11d1-aecc-08003616ce02"), Name = "ISEFileUIEvents",
-                AppProps = new string[] { "FileUIEvents" }, DocProps = new string[0], DocumentLevel = false },
             new Target { Id = new Guid("90223887-09cd-11d1-ba07-080036230602"), Name = "ISEApplicationEvents",
                 AppProps = new string[0], DocProps = new string[0], DocumentLevel = false },
         };
@@ -84,20 +85,20 @@ namespace SolidEdge.Spy.EventMcp
             return _status;
         }
 
-        /// <summary>僵尸订阅清理结果(暴露给 CLI --cleanup)。</summary>
+        /// <summary>订阅清理结果(暴露给 CLI --cleanup)。</summary>
         public sealed class SweepResult
         {
             public string Interface;
-            public int Total;
-            public int Dead;
+            public int Found;
+            public int Removed;
         }
 
         /// <summary>
-        /// 僵尸订阅清理(静态,供 SubscribeAll 前置与 CLI --cleanup 共用):
+        /// 订阅清理(静态,供 SubscribeAll 前置与 CLI --cleanup 共用):
         /// 前次 EventMcp 进程被强杀(客户端关闭/任务管理器)时来不及 Unadvise,
         /// SE 的连接点里留下悬空 sink;SE 弹同步对话框(如"另存为")时回调这些死
-        /// sink 导致对话框卡死(§5.8)。这里逐接口枚举现有 sink 并 QI 探活,
-        /// 只摘除死的,不碰任何活订阅(含其他存活插件的)。
+        /// sink 导致对话框卡死(§5.8)。按 cookie 逐个 Unadvise 全部现存订阅
+        /// (cookie 方式不触碰 sink 指针,死活都能安全清理,活订阅随后重建)。
         /// </summary>
         public static List<SweepResult> SweepZombies(Application app)
         {
@@ -109,15 +110,15 @@ namespace SolidEdge.Spy.EventMcp
 
             foreach (Target t in _targets)
             {
-                int total = 0, dead = 0;
-                Tuple<int, int> r = ConnectionPointHelper.SweepDeadSinks(app, t.Id);
-                if (r != null) { total += r.Item1; dead += r.Item2; }
+                int found = 0, removed = 0;
+                Tuple<int, int> r = ConnectionPointHelper.SweepConnectionCookies(app, t.Id);
+                if (r != null) { found += r.Item1; removed += r.Item2; }
                 if (doc != null)
                 {
-                    r = ConnectionPointHelper.SweepDeadSinks(doc, t.Id);
-                    if (r != null) { total += r.Item1; dead += r.Item2; }
+                    r = ConnectionPointHelper.SweepConnectionCookies(doc, t.Id);
+                    if (r != null) { found += r.Item1; removed += r.Item2; }
                 }
-                report.Add(new SweepResult { Interface = t.Name, Total = total, Dead = dead });
+                report.Add(new SweepResult { Interface = t.Name, Found = found, Removed = removed });
             }
             return report;
         }
@@ -128,7 +129,7 @@ namespace SolidEdge.Spy.EventMcp
             int swept = 0;
             foreach (SweepResult r in SweepZombies(app))
             {
-                swept += r.Dead;
+                swept += r.Removed;
             }
             if (swept > 0)
             {
@@ -157,7 +158,7 @@ namespace SolidEdge.Spy.EventMcp
             object activeDoc = GetActiveDocument(app);
             foreach (Target t in _targets)
             {
-                if (t.DocumentLevel) ConnectionPointHelper.SweepDeadSinks(activeDoc, t.Id);
+                if (t.DocumentLevel) ConnectionPointHelper.SweepConnectionCookies(activeDoc, t.Id);
             }
 
             for (int i = _subs.Count - 1; i >= 0; i--)

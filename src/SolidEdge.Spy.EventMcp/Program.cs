@@ -213,18 +213,18 @@ namespace SolidEdge.Spy.EventMcp
                     try
                     {
                         var results = SubscriptionManager.SweepZombies(app);
-                        Console.WriteLine("=== 僵尸订阅清理 ===");
-                        int total = 0, deadTotal = 0;
+                        Console.WriteLine("=== 订阅清理(cookie 方式,不触碰 sink 指针) ===");
+                        int total = 0, removedTotal = 0;
                         foreach (var r in results)
                         {
                             Console.WriteLine(" " + r.Interface.PadRight(30) +
-                                " 现有 sink=" + r.Total + ",清理死 sink=" + r.Dead);
-                            total += r.Total;
-                            deadTotal += r.Dead;
+                                " 发现订阅=" + r.Found + ",已摘除=" + r.Removed);
+                            total += r.Found;
+                            removedTotal += r.Removed;
                         }
-                        Console.WriteLine(deadTotal > 0
-                            ? "已清理 " + deadTotal + "/" + total + " 个死订阅,SE 弹窗应恢复正常。"
-                            : "没有发现死订阅(共 " + total + " 个活 sink 全部健康)。");
+                        Console.WriteLine(removedTotal > 0
+                            ? "已摘除 " + removedTotal + "/" + total + " 个订阅(含前次进程强杀残留的僵尸订阅),SE 弹窗应恢复正常。"
+                            : "没有需要清理的订阅(共 " + total + " 个)。");
                         code = 0;
                     }
                     finally
