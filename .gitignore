@@ -26,3 +26,6 @@ SolidEdgeFrameworkSupport.dll
 
 # Runtime logs / local state
 *.log
+
+# CodeBuddy AI assistant working data (never publish)
+.codebuddy/

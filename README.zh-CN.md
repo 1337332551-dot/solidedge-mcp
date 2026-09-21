@@ -47,6 +47,8 @@ Solid Edge 始终是唯一事实源：AI 不替代你的 CAD 工作流，而是�
 | `se_set_event_filter` | 开关事件源降噪（如等重算完成时静默命令类事件） |
 | `se_event_status` | 诊断：SE 连接状态、各事件接口订阅结果、缓冲统计——事件不触发时先查它 |
 
+事件中心用 200 条的环形缓冲存事件，读取基于游标（`afterSeq`）增量进行，多次读取之间不会漏事件。默认只关掉高频噪声源 `SelectSetChanged` 过滤器。事件二进制也有个小 CLI 用于冒烟测试：`--listen [秒]` 和 `--cleanup`。
+
 ## 权限模式
 
 在 MCP 配置的 server 节点上设置 `SE_MCP_MODE` 环境变量：
@@ -62,7 +64,14 @@ Solid Edge 始终是唯一事实源：AI 不替代你的 CAD 工作流，而是�
 
 门禁背后的工具风险档位：**Read**（12 个查询工具）/ **Session**（open/new/close 文档）/ **Model**（5 个改模型工具）/ **Escape**（`se_script_run`）。未登记工具 fail-closed，按最高危处理。
 
-另外还有第二层洋葱：成员级护栏（`Guardrail`），并且每次工具调用都会写入审计日志 `%LOCALAPPDATA%\SolidEdgeSpy\mcp-audit.log`。
+其他环境变量：
+
+| 变量 | 用途 |
+|---|---|
+| `SE_MCP_TIMEOUT_SECONDS` | 单次 COM 调用超时秒数（默认 120，最小 5）。大装配场景建议调大。 |
+| `SE_MCP_RECIPES_DIR` | 配方 JSON 的额外搜索路径（分号分隔多个）。不设时先在 exe 所在目录向上最多 8 层找 `recipes` 目录，最后兜底 `%LOCALAPPDATA%\SolidEdgeSpy\recipes`。`_` 开头的文件视为草稿，不能按名执行。 |
+
+另外还有第二层洋葱：成员级护栏（`Guardrail`），并且每次工具调用都会写入审计日志 `%LOCALAPPDATA%\SolidEdgeSpy\mcp-audit.log`。单次调用的耗时和成败记录在同目录的 `tool-usage.jsonl`（CLI 用 `--usage` 可出报表），`se_snapshot_diff` 的快照落盘在 `%LOCALAPPDATA%\SolidEdgeSpy\snapshots`。
 
 ## 环境要求
 
@@ -73,7 +82,7 @@ Solid Edge 始终是唯一事实源：AI 不替代你的 CAD 工作流，而是�
 ## 构建
 
 ```powershell
-git clone https://github.com/<your-account>/solidedge-mcp.git
+git clone https://github.com/1337332551-dot/solidedge-mcp.git
 cd solidedge-mcp
 dotnet build src/SolidEdge.Spy.McpServer -c Release
 dotnet build src/SolidEdge.Spy.EventMcp  -c Release
@@ -129,7 +138,17 @@ solidedge-mcp.exe get_document
 solidedge-mcp.exe invoke_member --objectId <id> --member Name
 ```
 
-常用开关：`-d` 文档 / `-s` 选中集 / `--vars` 变量 / `-w` 遍历 / `-desc` 描述 / `-p` 找路径 / `--geometry` 几何 / `--viewctx` 视图 / `--batchread` 批读 / `--snap` 快照对比 / `--probe` / `--preview`。写类开关（`--newpart`、`--newclose`、`--model`、`--set`、`--openclose`、`--cs`、`--recipe-run`）走同一张权限门禁表：readonly 模式下在触碰 Solid Edge 之前就被拒绝。完整清单见 `solidedge-mcp.exe --help`。
+常用开关：`-d` 文档 / `-s` 选中集 / `--vars` 变量 / `-w` 遍历 / `-desc` 描述 / `-p` 找路径 / `--geometry` 几何 / `--viewctx` 视图 / `--batchread` 批读 / `--snap` 快照对比 / `--probe` / `--preview`。写类开关（`--newpart`、`--newclose`、`--model`、`--set`、`--openclose`、`--cs`、`--recipe-run`）走同一张权限门禁表：readonly 模式下在触碰 Solid Edge 之前就被拒绝。多数短开关有长名别名（`--doc`、`--selection`、`--walk`、`--describe`、`--paths`）；`--preview` 接受 `-o/--out <文件>` 和视角名（`iso`/`top`/`front`/…/`current`）。完整清单见 `solidedge-mcp.exe --help`。
+
+实用工具类开关（大多不需要连接 Solid Edge）：
+
+| 开关 | 用途 |
+|---|---|
+| `--version` / `-v` | 打印构建时间戳后退出 |
+| `--usage` / `-u [天数]` | 从 `tool-usage.jsonl` 出调用统计报表（`--all`、`--by day`、`--sort calls\|ms\|last\|fail`） |
+| `--recipes` | 列出找到的全部配方（名称/状态/参数/来源目录） |
+| `--recipe-validate <名字\|路径>` | 静态校验配方，不碰 COM |
+| `--dialogs` | 弹窗探针：SE 卡死也能枚举模态框（`--close <hwnd> --confirm` 可受控关闭某个框） |
 
 ## 架构
 
@@ -151,7 +170,7 @@ src/
 ├── SolidEdge.Spy.McpServer/    # 执行 MCP server（21 工具）
 ├── SolidEdge.Spy.EventMcp/     # 事件 MCP server（4 工具）
 ├── SolidEdge.Shared/           # COM 互操作基础设施（编译期共享，单一数据源）
-tests/                          # 188 个单元测试（纯逻辑，不需要装 SE）
+tests/                          # 193 个单元测试（纯逻辑，不需要装 SE）
 scripts/                        # 辅助脚本（互操作程序集生成）
 ```
 
@@ -178,14 +197,14 @@ MCP server 由 AI 客户端在会话启动时拉起，任何 `mcp.json` 改动�
 互操作包版本号对应 SE 类型库版本：`108.0.0` = SE2022。其他 SE 版本把 `Interop.SolidEdge` 的 PackageReference 换成对应版本号（NuGet 上 105–220 都有），或用 `scripts/gen_interop.ps1` 从本机安装的 SE 生成。
 
 **让 AI 操作我的 CAD 安全吗？**
-纵深防御：传输层模式门禁（readonly/full）、写调用的成员级护栏、文档会话追踪（`close` 只关本会话自己打开的文档，绝不误关用户文档）、每次工具调用的审计日志（`%LOCALAPPDATA%\SolidEdgeSpy\mcp-audit.log`）。真正的建模改动之前会先跑 `dry-run` 静态校验。
+纵深防御：传输层模式门禁（readonly/full）、写调用的成员级护栏、文档会话追踪（`close` 只关本会话自己打开的文档，绝不误关用户文档）、每次工具调用的审计日志（`%LOCALAPPDATA%\SolidEdgeSpy\mcp-audit.log`）。真正的建模改动之前会先跑 `dry-run` 静态校验；`se_invoke_member` 写属性后默认自动回读比对（`verify=true`），防止"写入没报错但实际没生效"。
 
 **Solid Edge 弹了模态框，AI 会卡死吗？**
 不会：弹窗探针检测到模态框时直接上报框标题和按钮，而不是傻等到超时。
 
 ## 项目状态
 
-`se_model_build` 消费的 features JSON——建模中间表示（IR）——还处在**毛坯阶段**：op 覆盖面、默认值、字段名都可能随版本调整。如果你的工作流要依赖它，建议固定 commit 使用，并预期格式变动。来自真实参数化建模用例的反馈尤其有价值——欢迎开 issue 告诉你想建什么、卡在哪。
+`se_model_build` 消费的 features JSON——建模中间表示（IR）——还处在**毛坯阶段**：op 覆盖面、默认值、字段名都可能随版本调整。如果你的工作流要依赖它，建议固定 commit 使用，并预期格式变动。注意本仓库目前**不自带任何配方 JSON**——自己写好后把目录指给 `SE_MCP_RECIPES_DIR`，或放到 exe 旁边即可。来自真实参数化建模用例的反馈尤其有价值——欢迎开 issue 告诉你想建什么、卡在哪。
 
 ## Roadmap
 

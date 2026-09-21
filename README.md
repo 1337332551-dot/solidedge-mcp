@@ -47,6 +47,8 @@ Events server (`solidedge-event-mcp`):
 | `se_set_event_filter` | Enable/disable event sources to cut noise (e.g. silence command events while waiting for recompute) |
 | `se_event_status` | Diagnostics: SE connection, per-interface subscription state, buffer stats — start here when events don't fire |
 
+The event hub keeps a ring buffer of 200 events and reads are cursor-based (`afterSeq`), so nothing is lost between incremental reads. By default only the high-frequency `SelectSetChanged` filter is off to cut noise. The event binary also has a small CLI for smoke-testing: `--listen [seconds]` and `--cleanup`.
+
 ## Permission model
 
 Set the `SE_MCP_MODE` environment variable on the server entry in your MCP config:
@@ -62,7 +64,14 @@ Legacy `SE_MCP_READONLY=1` is still honored and maps to `readonly`. Changing the
 
 Tool risk tiers behind the gate: **Read** (12 query tools) / **Session** (open/new/close document) / **Model** (5 model-changing tools) / **Escape** (`se_script_run`). Unregistered tools are fail-closed (treated as the highest tier).
 
-There is also a member-level guardrail (`Guardrail`) as a second onion layer, and every tool call is written to an audit log at `%LOCALAPPDATA%\SolidEdgeSpy\mcp-audit.log`.
+Other environment variables:
+
+| Variable | Purpose |
+|---|---|
+| `SE_MCP_TIMEOUT_SECONDS` | Per-COM-call timeout in seconds (default 120, minimum 5). Raise it when working with huge assemblies. |
+| `SE_MCP_RECIPES_DIR` | Semicolon-separated extra search paths for recipe JSON files. Without it, recipes are looked up next to the exe (walking up 8 directory levels), then in `%LOCALAPPDATA%\SolidEdgeSpy\recipes`. Files starting with `_` are drafts and cannot be invoked by name. |
+
+There is also a member-level guardrail (`Guardrail`) as a second onion layer, and every tool call is written to an audit log at `%LOCALAPPDATA%\SolidEdgeSpy\mcp-audit.log`. Per-call timing and success/failure go to `tool-usage.jsonl` in the same folder (inspect it with `--usage`), and `se_snapshot_diff` snapshots persist in `%LOCALAPPDATA%\SolidEdgeSpy\snapshots`.
 
 ## Requirements
 
@@ -73,7 +82,7 @@ There is also a member-level guardrail (`Guardrail`) as a second onion layer, an
 ## Build
 
 ```powershell
-git clone https://github.com/<your-account>/solidedge-mcp.git
+git clone https://github.com/1337332551-dot/solidedge-mcp.git
 cd solidedge-mcp
 dotnet build src/SolidEdge.Spy.McpServer -c Release
 dotnet build src/SolidEdge.Spy.EventMcp  -c Release
@@ -129,7 +138,17 @@ solidedge-mcp.exe get_document
 solidedge-mcp.exe invoke_member --objectId <id> --member Name
 ```
 
-Common switches: `-d` document / `-s` selection / `--vars` variables / `-w` walk / `-desc` describe / `-p` find paths / `--geometry` / `--viewctx` / `--batchread` / `--snap` / `--probe` / `--preview`. Write-style switches (`--newpart`, `--newclose`, `--model`, `--set`, `--openclose`, `--cs`, `--recipe-run`) go through the same permission gate: in `readonly` mode they are rejected before touching Solid Edge. Run `solidedge-mcp.exe --help` for the full list.
+Common switches: `-d` document / `-s` selection / `--vars` variables / `-w` walk / `-desc` describe / `-p` find paths / `--geometry` / `--viewctx` / `--batchread` / `--snap` / `--probe` / `--preview`. Write-style switches (`--newpart`, `--newclose`, `--model`, `--set`, `--openclose`, `--cs`, `--recipe-run`) go through the same permission gate: in `readonly` mode they are rejected before touching Solid Edge. Most short switches have long aliases (`--doc`, `--selection`, `--walk`, `--describe`, `--paths`); `--preview` accepts `-o/--out <file>` and a view name (`iso`/`top`/`front`/.../`current`). Run `solidedge-mcp.exe --help` for the full list.
+
+Utility switches (no Solid Edge required for most):
+
+| Switch | Purpose |
+|---|---|
+| `--version` / `-v` | Print build timestamp and exit |
+| `--usage` / `-u [days]` | Call statistics report from `tool-usage.jsonl` (`--all`, `--by day`, `--sort calls\|ms\|last\|fail`) |
+| `--recipes` | List all recipes found (name / status / params / source directory) |
+| `--recipe-validate <name\|path>` | Static recipe validation, never touches COM |
+| `--dialogs` | Popup probe: enumerate modal dialogs even if Solid Edge is stuck (`--close <hwnd> --confirm` to dismiss one) |
 
 ## Architecture
 
@@ -151,7 +170,7 @@ src/
 ├── SolidEdge.Spy.McpServer/    # execution MCP server (21 tools)
 ├── SolidEdge.Spy.EventMcp/     # events MCP server (4 tools)
 ├── SolidEdge.Shared/           # COM interop infrastructure shared at compile time
-tests/                          # 188 unit tests (pure logic, no SE needed)
+tests/                          # 193 unit tests (pure logic, no SE needed)
 scripts/                        # helper scripts (interop generation)
 ```
 
@@ -178,14 +197,14 @@ MCP servers are spawned by the AI client when the session starts. Restart the co
 The interop package version matches the SE type-library version: `108.0.0` = SE2022. For other SE versions, bump the `Interop.SolidEdge` PackageReference to the matching version (105–220 exist on NuGet), or generate interop assemblies from your own install with `scripts/gen_interop.ps1`.
 
 **Is it safe to let an AI operate my CAD?**
-Defense in depth: transport-layer mode gate (readonly/full), member-level guardrail on write calls, document-session tracking (`close` only closes documents the session itself opened), and an audit log of every tool call at `%LOCALAPPDATA%\SolidEdgeSpy\mcp-audit.log`. `dry-run` validation runs before any real modeling change.
+Defense in depth: transport-layer mode gate (readonly/full), member-level guardrail on write calls, document-session tracking (`close` only closes documents the session itself opened), and an audit log of every tool call at `%LOCALAPPDATA%\SolidEdgeSpy\mcp-audit.log`. `dry-run` validation runs before any real modeling change, and `se_invoke_member` re-reads a property after writing it (`verify=true` by default) to catch silent no-ops.
 
 **The AI hangs when Solid Edge shows a dialog.**
 It doesn't: a popup probe detects modal dialogs and reports their title and buttons instead of blocking until timeout.
 
 ## Project status
 
-The feature-spec JSON — the intermediate representation (IR) that `se_model_build` consumes — is still **rough and evolving**: op coverage, defaults and field names may change between versions. If you build workflows on it, pin a commit and expect churn. Feedback from real parametric-modeling use cases is especially valuable — open an issue and tell us what you tried to model.
+The feature-spec JSON — the intermediate representation (IR) that `se_model_build` consumes — is still **rough and evolving**: op coverage, defaults and field names may change between versions. If you build workflows on it, pin a commit and expect churn. Note that this repo currently ships **no bundled recipe JSON files** — write your own and point `SE_MCP_RECIPES_DIR` at the folder, or drop them next to the exe. Feedback from real parametric-modeling use cases is especially valuable — open an issue and tell us what you tried to model.
 
 ## Roadmap
 
