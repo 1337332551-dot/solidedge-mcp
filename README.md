@@ -29,6 +29,18 @@ Real workflows it supports today:
 | Execution | `solidedge-mcp` | 21 tools: query, document, modeling, scripting |
 | Events | `solidedge-event-mcp` | 4 tools: subscribe/wait/query Solid Edge events |
 
+## Designed to pair with skills
+
+The tool surface is deliberately small — **21 tools, not 200**. The workflow knowledge is meant to live one layer up, in **skills**: versioned, editable knowledge packages (company drawing standards, feature naming rules, typical-part modeling SOPs — written by you or distilled by the AI itself from a session) that tell the AI *what to build and in what order*. This server provides the safe, verified primitives underneath: read, build, probe, audit.
+
+That division keeps domain knowledge out of tool code:
+
+- Extend coverage by editing markdown, not by shipping a new server version
+- Team standards live in a git repo alongside your models, not baked into a binary
+- `se_recipe_run` is the executable half of the contract — a skill (or the AI) emits a JSON feature spec, the server dry-run validates it, then builds
+
+If you prefer a fat-tool server that maps the whole COM API 1:1, other projects do that; this one bets on skills + primitives.
+
 ## Tool overview (execution server)
 
 | Category | Tools |
