@@ -245,6 +245,81 @@ internal static class CliRunner
 					result = 0;
 					break;
 				}
+				case "--assembly":
+				{
+					// 装配批量操作冒烟入口,支持 --assembly <ops.json> [objId] 与 --assembly --validate <ops.json>
+					if (args.Length < 2)
+					{
+						Console.WriteLine("缺少参数。用法: solidedge-mcp --assembly <ops.json> [objId]  或  solidedge-mcp --assembly --validate <ops.json>(纯校验不碰 COM)");
+						result = 1;
+						break;
+					}
+					int fileArg = 1;
+					bool validateOnly = args.Length > 1 && args[1].Equals("--validate", StringComparison.Ordinal);
+					if (validateOnly)
+					{
+						fileArg = 2;
+						if (args.Length < 3)
+						{
+							Console.WriteLine("缺少 JSON 文件路径。用法: solidedge-mcp --assembly --validate <ops.json>");
+							result = 1;
+							break;
+						}
+					}
+					if (fileArg >= args.Length)
+					{
+						Console.WriteLine("缺少 JSON 文件路径。");
+						result = 1;
+						break;
+					}
+					JsonElement asmRoot = JsonDocument.Parse(File.ReadAllText(args[fileArg])).RootElement;
+					JsonElement asmOps = asmRoot;
+					if (asmRoot.ValueKind == JsonValueKind.Object && asmRoot.TryGetProperty("ops", out var opsValue))
+					{
+						asmOps = opsValue;
+					}
+					if (asmOps.ValueKind != JsonValueKind.Array)
+					{
+						Console.WriteLine("JSON 文件必须是数组或 {\"ops\":[...]}。");
+						result = 1;
+						break;
+					}
+					List<JsonElement> asmList = new List<JsonElement>();
+					foreach (JsonElement item in asmOps.EnumerateArray())
+					{
+						asmList.Add(item);
+					}
+					if (validateOnly)
+					{
+						// 纯本地校验(不碰 COM):复用 AssemblySpec,输出与 dryRun 一致
+						var asmReport = AssemblySpec.Validate(asmList.ToArray());
+						Console.WriteLine(asmReport.ToJson());
+						result = asmReport.HasError ? 1 : 0;
+						break;
+					}
+					string asmObjId = null;
+					int objArg = fileArg + 1;
+					if (objArg < args.Length && !args[objArg].StartsWith("--", StringComparison.Ordinal))
+					{
+						asmObjId = args[objArg];
+					}
+					Console.WriteLine(AssemblyBuildTools.se_assembly_build(context, asmList.ToArray(), asmObjId, false, HasFlag(args, "--confirm")));
+					result = 0;
+					break;
+				}
+				case "--assemblyquery":
+				{
+					// 装配只读查询冒烟:--assemblyquery [mode] [objId]
+					string asmMode = (args.Length > 1 && !args[1].StartsWith("--", StringComparison.Ordinal)) ? args[1] : "occurrences";
+					string asmQObjId = null;
+					for (int a = 2; a < args.Length; a++)
+					{
+						if (!args[a].StartsWith("--", StringComparison.Ordinal)) { asmQObjId = args[a]; break; }
+					}
+					Console.WriteLine(AssemblyQueryTools.se_assembly_query(context, asmMode, asmQObjId));
+					result = 0;
+					break;
+				}
 				case "--set":
 				{
 					if (args.Length < 3)
@@ -549,6 +624,16 @@ internal static class CliRunner
 		}
 	}
 
+	private static bool HasFlag(string[] args, string flag)
+	{
+		if (args == null) return false;
+		foreach (string a in args)
+		{
+			if (string.Equals(a, flag, StringComparison.Ordinal)) return true;
+		}
+		return false;
+	}
+
 	private static string ExtractFirstObjId(string json)
 	{
 		try
@@ -620,6 +705,8 @@ internal static class CliRunner
 		Console.WriteLine("  solidedge-mcp --walk <路径>                  按对象结构路径取对象");
 		Console.WriteLine("  solidedge-mcp --describe <objId>             详细描述对象");
 		Console.WriteLine("  solidedge-mcp --model <json> [objId]         声明式建模(features JSON)");
+		Console.WriteLine("  solidedge-mcp --assembly <ops.json> [objId] [--confirm]  装配批量操作(ops JSON;加 --validate 只校验不碰 COM)");
+		Console.WriteLine("  solidedge-mcp --assemblyquery [mode] [objId]  装配只读查询(mode: occurrences/relations/bom/all)");
 		Console.WriteLine("  solidedge-mcp --paths <objId>                查找对象可达路径");
 		Console.WriteLine("  solidedge-mcp --geometry [target]            读几何定位(默认 refplanes;支持 model / obj-N)");
 		Console.WriteLine("  solidedge-mcp --preview [视角] [-o 路径]      视口截图(视角: iso/top/front/back/left/right/bottom/current,默认 iso)");

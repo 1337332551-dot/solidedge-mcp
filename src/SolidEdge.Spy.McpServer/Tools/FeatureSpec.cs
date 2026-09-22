@@ -67,6 +67,31 @@ namespace SolidEdge.Spy.McpServer.Tools
         /// </summary>
         public double[] AxisP1, AxisP2;
 
+        /// <summary>
+        /// 圆角半径(fillet 专用,米)。null = 未给,由校验/构建报错。
+        /// </summary>
+        public double? Radius;
+
+        /// <summary>
+        /// 边引用数组(fillet/chamfer 专用):被倒圆/倒角的已有实体边。
+        /// </summary>
+        public List<EdgeRefSpec> Edges = new List<EdgeRefSpec>();
+
+        /// <summary>是否提供了有效的 edges 数组(至少 1 条可解析)。</summary>
+        public bool HasEdges;
+
+        /// <summary>筋板厚度(rib 专用,米)。null = 未给。</summary>
+        public double? Thickness;
+
+        /// <summary>被阵列的特征名(pattern 专用):本批之前特征的 name、SE 特征名或 obj-K 句柄。</summary>
+        public string Of;
+
+        /// <summary>X/Y 方向阵列个数(pattern 专用)。null = 未给。</summary>
+        public int? XCount, YCount;
+
+        /// <summary>X/Y 方向阵列间距(pattern 专用,米)。null = 未给。</summary>
+        public double? XSpacing, YSpacing;
+
         /// <summary>是否提供了有效旋转轴(写了且两点不退化)。</summary>
         public bool HasAxis;
 
@@ -135,11 +160,31 @@ namespace SolidEdge.Spy.McpServer.Tools
         /// <summary>原始 JSON(Clone 过,可安全跨作用域持有),供校验器做类型/未知字段等细查。</summary>
         public JsonElement Raw;
 
-        /// <summary>该特征是否带草图形状(plane op 不需要)。</summary>
+        /// <summary>该特征是否带草图形状(plane/fillet/chamfer/pattern 不需要;rib 需要开放链,单独放宽)。</summary>
         public bool NeedsShape
         {
-            get { return OpLower == "extrude" || OpLower == "cut" || OpLower == "revolve"; }
+            get
+            {
+                return OpLower == "extrude" || OpLower == "cut" || OpLower == "revolve" || OpLower == "rib";
+            }
         }
+    }
+
+    /// <summary>
+    /// 边引用声明(fillet/chamfer 专用)。
+    /// face 写 "face:&lt;Face.ID&gt;"(Face.ID 是唯一稳定索引,见 L2 modeling-recipes §七)或纯整数;
+    /// edge 是该面内 0-based 边索引(运行期转 COM 1-based)。
+    /// </summary>
+    public sealed class EdgeRefSpec
+    {
+        /// <summary>目标面的 Face.ID。</summary>
+        public int FaceId;
+
+        /// <summary>该面内 0-based 边索引。</summary>
+        public int EdgeIndex;
+
+        /// <summary>解析失败原因;null = 可用。</summary>
+        public string ParseError;
     }
 
     /// <summary>
@@ -176,7 +221,11 @@ namespace SolidEdge.Spy.McpServer.Tools
                 "circle", "circles", "slot", "rect", "polygon", "loops",
                 "axis", "angle", "degrees",   // revolve 专用
                 "autoconstraint", "fixorigin", "dims",   // 2026-09-13:完全约束+变量绑定(End 前应用)
-                "endmode"   // 预留
+                "endmode",   // 预留
+                // 2026-09-22 扩 op:fillet / chamfer / rib / pattern
+                "radius", "edges",           // fillet/chamfer 专用
+                "thickness",                 // rib 专用
+                "of", "xcount", "ycount", "xspacing", "yspacing"   // pattern 专用
             };
 
         public static List<FeatureSpec> ParseAll(JsonElement[] features)
@@ -215,8 +264,15 @@ namespace SolidEdge.Spy.McpServer.Tools
 
             if (TryGetDbl(feat, "distance", out double dist)) { s.Distance = dist; s.HasDistance = true; }
             if (TryGetDbl(feat, "depth", out double d)) s.Depth = d;
+            if (TryGetDbl(feat, "radius", out double rad)) s.Radius = rad;
+            if (TryGetDbl(feat, "thickness", out double thk)) s.Thickness = thk;
             if (TryGetInt(feat, "side", out int sd)) s.Side = sd;
             if (TryGetInt(feat, "profileside", out int ps)) s.ProfileSide = ps;
+            if (TryGetInt(feat, "xcount", out int xc)) s.XCount = xc;
+            if (TryGetInt(feat, "ycount", out int yc)) s.YCount = yc;
+            if (TryGetDbl(feat, "xspacing", out double xs)) s.XSpacing = xs;
+            if (TryGetDbl(feat, "yspacing", out double ys)) s.YSpacing = ys;
+            s.Of = GetStr(feat, "of");
             if (TryGetBool(feat, "visible", out bool vb)) s.Visible = vb;
             if (TryGetBoolCI(feat, "autoconstraint", out bool ac)) s.AutoConstraint = ac;
             if (TryGetBoolCI(feat, "fixorigin", out bool fo)) s.FixOrigin = fo;
@@ -233,7 +289,12 @@ namespace SolidEdge.Spy.McpServer.Tools
                     else
                     {
                         if (item.TryGetProperty("element", out var elEl) && elEl.ValueKind == JsonValueKind.Number)
-                            ds.Element = elEl.GetInt32();
+                        {
+                            // 必须用 TryGetInt32:写成 1.5 这类小数时 GetInt32 会抛 InvalidOperationException,
+                            // 一路把校验/构建带崩(2026-09-14),降级成 ParseError 由校验器报出。
+                            if (elEl.TryGetInt32(out int elIdx)) ds.Element = elIdx;
+                            else ds.ParseError = "element 必须是整数(当前 " + elEl.GetRawText() + ")";
+                        }
                         else
                             ds.ParseError = "缺 element(0-based 线索引)";
                         ds.Name = GetStr(item, "name");
@@ -249,7 +310,21 @@ namespace SolidEdge.Spy.McpServer.Tools
                 }
             }
 
+            // 边引用(fillet/chamfer 专用):解析失败也逐条记录,由校验器/构建器报出
+            if (feat.TryGetProperty("edges", out var edgesEl) && edgesEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in edgesEl.EnumerateArray())
+                    s.Edges.Add(ParseEdgeRef(item));
+                s.HasEdges = s.Edges.Exists(e => e.ParseError == null);
+            }
+            else if (feat.TryGetProperty("edges", out _))
+            {
+                s.Edges.Add(new EdgeRefSpec { ParseError = "edges 必须是数组" });
+            }
+
+
             // 形状:优先 circle(与构建器取形状的先后顺序完全一致)
+            // rib 例外:筋板轮廓是【开放链】(2 点即合法),走放宽解析,不走闭合环逻辑。
             if (TryGetCircle(feat, out double cx, out double cy, out double r))
             {
                 s.HasCircle = true;
@@ -271,6 +346,7 @@ namespace SolidEdge.Spy.McpServer.Tools
             else
             {
                 // 构建器在这里会抛异常;解析器改为记录错误,由构建器在用时抛、校验器当 issue 报。
+                // rib 也走闭合环(SE 2022 实测:开放链经 Ribs.Add 不出几何,闭合轮廓才出——见对照表 §rib)。
                 try
                 {
                     s.Loops = ParseLoops(feat);
@@ -514,6 +590,59 @@ namespace SolidEdge.Spy.McpServer.Tools
             }
 
             throw new ArgumentException("特征缺少 rect(两角点)或 polygon(>=3 点)草图。");
+        }
+
+        /// <summary>
+        /// 解析单条边引用。两种写法:
+        ///   {"face":"face:71","edge":0}   (推荐,与 se_read_geometry / 对方项目的 0-based 约定一致)
+        ///   {"face":71,"edge":0}          (整数简写)
+        /// </summary>
+        private static EdgeRefSpec ParseEdgeRef(JsonElement item)
+        {
+            var er = new EdgeRefSpec();
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                er.ParseError = "必须是对象 {\"face\":\"face:71\",\"edge\":0}";
+                return er;
+            }
+
+            if (item.TryGetProperty("face", out var fEl))
+            {
+                if (fEl.ValueKind == JsonValueKind.Number && fEl.TryGetInt32(out int fid))
+                    er.FaceId = fid;
+                else if (fEl.ValueKind == JsonValueKind.String)
+                {
+                    string f = fEl.GetString();
+                    if (f != null && f.StartsWith("face:", StringComparison.OrdinalIgnoreCase) &&
+                        int.TryParse(f.Substring(5).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int fid2))
+                        er.FaceId = fid2;
+                    else
+                        er.ParseError = "face 应为 \"face:<Face.ID>\" 或整数";
+                }
+                else
+                    er.ParseError = "face 应为 \"face:<Face.ID>\" 或整数";
+            }
+            else
+            {
+                er.ParseError = (er.ParseError != null ? er.ParseError + ";" : "") + "缺 face";
+            }
+
+            if (item.TryGetProperty("edge", out var eEl))
+            {
+                if (eEl.ValueKind == JsonValueKind.Number && eEl.TryGetInt32(out int ei))
+                {
+                    if (ei >= 0) er.EdgeIndex = ei;
+                    else er.ParseError = (er.ParseError != null ? er.ParseError + ";" : "") + "edge 必须 >= 0(0-based)";
+                }
+                else
+                    er.ParseError = (er.ParseError != null ? er.ParseError + ";" : "") + "edge 必须是整数";
+            }
+            else
+            {
+                er.ParseError = (er.ParseError != null ? er.ParseError + ";" : "") + "缺 edge(0-based 面内边索引)";
+            }
+
+            return er;
         }
 
         /// <summary>解析 [[x,y],...] 点列;不足 2 点返回 null。</summary>

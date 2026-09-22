@@ -123,6 +123,19 @@ internal static class RecipeStore
 		}
 	}
 
+	/// <summary>
+	/// 测试专用:清空 <see cref="SearchDirs"/> 的静态缓存(_dirs),使下一次调用重新读环境变量。
+	/// 单元测试在同一 xUnit 进程里逐用例切换 SE_MCP_RECIPES_DIR 时必须先调这个,
+	/// 否则第一次调用后缓存永不过期,后续用例拿到旧目录(假失败)。运行期无调用方。
+	/// </summary>
+	internal static void ResetForTests()
+	{
+		lock (Sync)
+		{
+			_dirs = null;
+		}
+	}
+
 	/// <summary>列出全部可执行配方(同名先命中优先)。</summary>
 	internal static List<RecipeRef> List()
 	{

@@ -40,7 +40,12 @@ internal static class ToolUsage
 	}
 
 	/// <summary>记录一次已完成的工具调用。任何异常都吞掉——计量绝不能影响主流程。</summary>
-	internal static void Record(string source, string tool, long elapsedMs, bool ok, string errorCode, int argsCount)
+	/// <remarks>
+	/// L14（2026-09-21）：<paramref name="errText"/> = 失败时的错误原文（截 300 字落盘）。
+	/// 之前只记 err 代号（toolStatusError/toolError），112 条失败无法做文本细分。
+	/// 可选参数，旧调用点不破坏。
+	/// </remarks>
+	internal static void Record(string source, string tool, long elapsedMs, bool ok, string errorCode, int argsCount, string errText = null)
 	{
 		try
 		{
@@ -55,6 +60,10 @@ internal static class ToolUsage
 			if (!string.IsNullOrEmpty(errorCode))
 			{
 				sb.Append(",\"err\":\"").Append(Escape(errorCode)).Append('"');
+			}
+			if (!string.IsNullOrEmpty(errText))
+			{
+				sb.Append(",\"errText\":\"").Append(Escape(Truncate(errText, 300))).Append('"');
 			}
 			sb.Append('}');
 			string line = sb.ToString();
@@ -401,5 +410,15 @@ internal static class ToolUsage
 			return "";
 		}
 		return s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+	}
+
+	/// <summary>L14：错误原文截断（留尾不留头会丢前缀语义，故从头截）。</summary>
+	private static string Truncate(string s, int max)
+	{
+		if (string.IsNullOrEmpty(s) || s.Length <= max)
+		{
+			return s;
+		}
+		return s.Substring(0, max);
 	}
 }

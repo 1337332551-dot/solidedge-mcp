@@ -214,7 +214,7 @@ namespace SolidEdge.Spy.McpServer
                 {
                     if (prop.GetFunction == null || prop.GetFunctionHasParameters) continue;
                     string name = prop.Name;
-                    if (ComSideEffectGuard.IsBlocked(name)) continue;
+                    if (BlockedMembers.IsBlocked(name)) continue;
 
                     object value = null;
                     try
@@ -333,8 +333,8 @@ namespace SolidEdge.Spy.McpServer
 
                     string name = prop.Name;
 
-                    // 副作用成员一律跳过(共享黑名单,见 ComSideEffectGuard)。
-                    if (ComSideEffectGuard.IsBlocked(name)) continue;
+                    // 副作用成员一律跳过(MAPI 会签类,共享黑名单,见 BlockedMembers)。
+                    if (BlockedMembers.IsBlocked(name)) continue;
 
                     // 剪枝判定:该属性是否可能通往目标。
                     bool relevant = !string.IsNullOrEmpty(targetKey) &&

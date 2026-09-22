@@ -51,6 +51,16 @@ internal sealed class JsonRpcTap : Stream
 	private static readonly object CallsLock = new object();
 	private const int MaxPendingChars = 2000000;
 
+	// L02（2026-09-21）：包装型工具（se_script_run / se_recipe_run 等）把业务失败包成
+	// 正常 result，失败语义藏在 "status":"<X>" 文本里。命中任一标记 → 计量为失败。
+	private static readonly string[] FailureStatusMarkers =
+	{
+		"\"status\":\"error\"",
+		"\"status\":\"compile_error\"",
+		"\"status\":\"exit_nonzero\"",
+		"\"status\":\"timeout\"",
+	};
+
 	// 排障开关:环境变量 SE_MCP_TAP_DEBUG=1 时,把旁路观察到的行写 tap-debug.log(最多 500 行)。
 	// 用于定位"统计没落盘"这类问题:能看出流是否被读到、行内容是否符合预期。
 	private static readonly bool DebugTrace = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SE_MCP_TAP_DEBUG"));
@@ -332,6 +342,7 @@ internal sealed class JsonRpcTap : Stream
 		}
 		bool ok = true;
 		string err = null;
+		string errText = null;    // L14（2026-09-21）：失败原文，截 300 落进 tool-usage
 		JsonElement errorEl;
 		if (root.TryGetProperty("error", out errorEl) && errorEl.ValueKind == JsonValueKind.Object)
 		{
@@ -350,6 +361,11 @@ internal sealed class JsonRpcTap : Stream
 			{
 				err = "protocol";
 			}
+			JsonElement msgEl;
+			if (errorEl.TryGetProperty("message", out msgEl) && msgEl.ValueKind == JsonValueKind.String)
+			{
+				errText = msgEl.GetString();
+			}
 		}
 		else
 		{
@@ -361,22 +377,35 @@ internal sealed class JsonRpcTap : Stream
 				{
 					ok = false;
 					err = "toolError:" + TruncateMessage(FirstContentText(resultEl));
+					errText = FirstContentText(resultEl);
 				}
 				else
 				{
 					// 本仓库的工具把业务错误包装成正常 result(文本里是 {"status":"error",...}),
-					// 不标 isError。故补一条启发式:content[0].text 以 status=error 开头 → 记为失败。
+					// 不标 isError。故补一条启发式:content[0].text 命中失败 status → 记为失败。
+					// L02（2026-09-21）：失败 status 集合从 {"error"} 扩到
+					//   {error, compile_error, exit_nonzero, timeout} ——
+					//   se_script_run/se_recipe_run 把编译失败/退出码非0/超时都包成正常
+					//   result，导致 78 条假成功（audit 93 实败 vs tool-usage 全记 ok:true）。
 					string text = FirstContentText(resultEl);
-					if (text != null && text.IndexOf("\"status\":\"error\"", StringComparison.Ordinal) >= 0)
+					if (text != null)
 					{
-						ok = false;
-						err = "toolStatusError:" + TruncateMessage(ExtractErrorMessage(text));
+						foreach (string badStatus in FailureStatusMarkers)
+						{
+							if (text.IndexOf(badStatus, StringComparison.Ordinal) >= 0)
+							{
+								ok = false;
+								err = "toolStatusError:" + TruncateMessage(ExtractErrorMessage(text));
+								errText = text;
+								break;
+							}
+						}
 					}
 				}
 			}
 		}
 		long ms = (Stopwatch.GetTimestamp() - call.StartTicks) * 1000L / Stopwatch.Frequency;
-		ToolUsage.Record(_source, call.Tool, ms, ok, err, call.ArgsCount);
+		ToolUsage.Record(_source, call.Tool, ms, ok, err, call.ArgsCount, errText);
 	}
 
 	/// <summary>进程/传输结束前,把仍未配对的调用记一次(ok=false, err=noResponse),避免超时/取消的调用不留痕。</summary>

@@ -200,7 +200,7 @@ public static class SelectionTools
 					return Error("当前没有活动文档,无法搜索。");
 				}
 				EnsureTypeLibrariesLoaded();
-				ObjectExplorer objectExplorer = new ObjectExplorer(50000, 10, 20, 30);
+				ObjectExplorer objectExplorer = new ObjectExplorer(50000, 10, 20, 25);   // L07: 30→25,赶在传输层 30s 超时前返回
 
 				if (byName)
 				{
@@ -211,6 +211,21 @@ public static class SelectionTools
 					}
 					// 从 ActiveDocument 起扫:目标对象基本都在文档子树(含 Sheets 里的视图编辑上下文)
 					List<string> listByName = objectExplorer.FindByName(activeDocForSearch, "Application.ActiveDocument", target);
+					// L07（2026-09-21）:超时无结果 → 显式失败语义,不再伪装 status=ok。
+					// 旧行为:text 说成功 + 传输层报 -32001 超时,自相矛盾(报告 §2.2 矛盾型)。
+					if (objectExplorer.TimedOut && listByName.Count == 0)
+					{
+						return JsonSerializer.Serialize(new
+						{
+							status = "error",
+							searchBy = "name",
+							name = target,
+							timedOut = true,
+							pathsFound = 0,
+							paths = listByName,
+							message = "25 秒遍历预算用尽且未找到目标,可能在大文档深处。建议用 se_walk_object 逐层下钻缩小范围后重试。"
+						});
+					}
 					return JsonSerializer.Serialize(new
 					{
 						status = "ok",
@@ -220,9 +235,7 @@ public static class SelectionTools
 						paths = listByName,
 						truncated = objectExplorer.TimedOut,
 						hint = (listByName.Count == 0
-							? (objectExplorer.TimedOut
-								? "30 秒遍历预算用尽,可能在大文档深处。建议用 se_walk_object 逐层下钻缩小范围后重试。"
-								: "未找到 Name/Key 等于该名字的对象。注意名字区分大小写不敏感但需完全相等;模糊查找可去掉前后缀重试(如只传数字部分)。")
+							? "未找到 Name/Key 等于该名字的对象。注意名字区分大小写不敏感但需完全相等;模糊查找可去掉前后缀重试(如只传数字部分)。"
 							: (objectExplorer.TimedOut ? "已找到路径,但遍历超时提前停止,可能还有更多路径未列出。" : null))
 					});
 				}
@@ -238,6 +251,20 @@ public static class SelectionTools
 					return Error("当前没有活动文档。");
 				}
 				List<string> list = objectExplorer.FindPaths(activeDocument, "Application.ActiveDocument", handle.IUnknownPtr, handle.TypeName);
+				// L07:超时无结果 → 显式失败语义(同 byName 分支)
+				if (objectExplorer.TimedOut && list.Count == 0)
+				{
+					return JsonSerializer.Serialize(new
+					{
+						status = "error",
+						objectId = objectId,
+						objectType = handle.TypeName,
+						timedOut = true,
+						pathsFound = 0,
+						paths = list,
+						message = "25 秒遍历预算用尽且未找到路径。可改用 se_walk_object 按路径逐层探索(快)。"
+					});
+				}
 				return JsonSerializer.Serialize(new
 				{
 					status = "ok",
@@ -247,7 +274,7 @@ public static class SelectionTools
 					pathsFound = list.Count,
 					paths = list,
 					truncated = objectExplorer.TimedOut,
-					hint = (objectExplorer.TimedOut ? "遍历超出 30 秒时间预算已提前停止。可改用 se_walk_object 按路径逐层探索(快)。" : null)
+					hint = (objectExplorer.TimedOut ? "遍历超出 25 秒时间预算已提前停止,已返回部分路径。可改用 se_walk_object 按路径逐层探索(快)。" : null)
 				});
 			});
 		}
@@ -409,7 +436,7 @@ public static class SelectionTools
 		foreach (ComPropertyInfo comPropertyInfo in properties)
 		{
 			string name = comPropertyInfo.Name;
-			if (ComSideEffectGuard.IsBlocked(name))
+			if (BlockedMembers.IsBlocked(name))
 			{
 				continue;
 			}

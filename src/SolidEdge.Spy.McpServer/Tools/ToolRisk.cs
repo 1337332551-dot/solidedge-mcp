@@ -55,18 +55,20 @@ internal static class ToolRisk
 		["se_capture_viewport"] = RiskTier.Read,
 		["se_snapshot_diff"] = RiskTier.Read,      // 本地快照 store,不碰 COM
 		["se_validate_features"] = RiskTier.Read,  // 纯静态校验,不碰 COM
+		["se_assembly_query"] = RiskTier.Read,     // 装配只读查询(occurrences/relations/bom),只读模式可用
 
 		// ---- Session 档(3):文档会话操作 ----
 		["se_open_document"] = RiskTier.Session,
 		["se_new_document"] = RiskTier.Session,
 		["se_close_document"] = RiskTier.Session,
 
-		// ---- Model 档(5):写模型 ----
+		// ---- Model 档(6):写模型/装配 ----
 		["se_model_build"] = RiskTier.Model,
 		["se_extrude_on_face"] = RiskTier.Model,
 		["se_invoke_member"] = RiskTier.Model,
 		["se_invoke_chain"] = RiskTier.Model,
 		["se_recipe_run"] = RiskTier.Model,
+		["se_assembly_build"] = RiskTier.Model,    // 装配声明式操作(place/constrain/...),破坏性 op 另需 confirm
 
 		// ---- Escape 档(1):任意代码执行,只读模式整体禁用 ----
 		["se_script_run"] = RiskTier.Escape

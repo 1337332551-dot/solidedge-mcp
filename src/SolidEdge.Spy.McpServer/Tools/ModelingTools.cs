@@ -24,6 +24,10 @@ namespace SolidEdge.Spy.McpServer.Tools
     ///   revolve 旋转凸台(截面 + 独立旋转轴 → Model.RevolvedProtrusions.AddFinite;
     ///           轴是草图平面内的一条线,不参与截面闭环;建完自动隐藏草图);
     ///           mode:"cut" 走旋转切割 RevolvedCutouts.AddFinite(在已有实体上切除)
+    ///   fillet  圆角(Rounds.Add):edges 引用已有实体边,face 用 Face.ID(唯一稳定索引)
+    ///   chamfer 等距倒角(Chamfers.AddEqualSetback):同 fillet 的边引用
+    ///   rib     筋板/薄台(Ribs.Add):★闭合轮廓+plane 贴实体表面才出几何(SE 2022 实测,开放链不支持)
+    ///   pattern 矩形阵列:SE 2022 COM 不可达(AddByRectangular 全种子 E_FAIL),诚实拒绝并给替代方案
     ///
     /// 草图形状:circle 圆({center,radius} 或 [cx,cy,r];圆轮廓拉伸即真圆柱,无需旋转)/
     ///           circles 多真圆([[x,y,r],...],一个轮廓多环,一次切/拉多个真圆孔)/
@@ -58,10 +62,21 @@ namespace SolidEdge.Spy.McpServer.Tools
         ///   ★ cut 的"切哪一侧" = side + profileside 共同决定;调用方【没显式给】的维度,
         ///     op 会自动按组合重试直到几何正常(只能纠正"切到实体外"的僵尸;合法但镜像的判不出来)
         ///   visible:  可选 bool,false=自动隐藏草图(默认),true=保留显示
+        ///
+        /// 参数化(可选,只对 rect/polygon/loops 直线环生效;circle/circles/slot 会被忽略并回传 warning):
+        ///   autoconstraint: true 时按坐标自动补水平/垂直约束(|dy|<eps→水平,|dx|<eps→垂直)
+        ///   fixorigin:      true 时固定首环首线起点(AddKeypointFix),消掉整体平移自由度
+        ///   dims:           [{"element":0,"name":"Len1","value":"40 mm"} 或 {"formula":"Rad1 - 5 mm"}]
+        ///                   element 是【跨环扁平的 0-based 线索引】(第 0 环的线排最前;轴不占位),
+        ///                   name 会进变量表(标注即变量),formula 可引用本批已建变量做关联式。
+        ///                   必须在 Profile.End 之前应用(构建器已内置此时序)。
         /// 返回每个特征的名称/Status(1216476310=正常,1216476311=几何未生成)/面数/句柄。
         /// 坐标单位为米。
         /// </summary>
-        [McpServerTool, Description("高级声明式建模:一次调用创建多个特征(拉伸/除料/旋转/局部参考面)。" +
+        [McpServerTool, Description("高级声明式建模:一次调用创建多个特征(拉伸/除料/旋转/局部参考面/圆角/倒角/筋板)。" +
+            "扩 op:fillet 圆角 {op,radius,edges:[{face:'face:ID',edge:0-based}]};" +
+            "chamfer 等距倒角 {op,distance,edges};rib 筋板 {op,plane,闭合轮廓,thickness}(轮廓须闭合且 plane 贴实体表面);" +
+            "pattern 阵列在 SE 2022 COM 不可达(诚实拒绝,多孔阵列改用一个 cut+circles)。" +
             "features 每项 {op, name?, plane|base, 形状, side, profileside, depth, axis?, angle?|degrees?, visible?}。" +
             "op=revolve 旋转凸台(默认)或旋转切割(mode:\"cut\"走 RevolvedCutout):截面用 rect/polygon/loops,必须给 axis 旋转轴两点(草图平面局部 u/v," +
             "如 \"axis\":[[0,0],[0,0.05]] 沿局部 v 轴);angle 弧度(默认 2π 整圈)或 degrees 度。" +
@@ -69,11 +84,17 @@ namespace SolidEdge.Spy.McpServer.Tools
             "★ 每个特征建完【自动校验】Status:不等于正常值即判失败并自动删除该特征回滚," +
             "所以返回结果里 status=ok 就一定是健康的,你无需再检查 1216476310/1216476311 这类状态码;" +
             "任一特征失败即停止后续(避免连环僵尸),按该条 diagnosis 修正后重跑。" +
+            "★ 防误建守卫(推荐每次都传):expectDocument=期望的文档名,COM 调用内先核对当前文档 Name,不符立即拒绝且一个特征都不建——" +
+            "防患于未然,杜绝建到错误的活动文档里。" +
             "形状六选一:circle 圆(写 {\"center\":[x,y],\"radius\":r} 或简写 [x,y,r];圆轮廓拉伸=真圆柱,面数 3)、" +
             "circles 多真圆(写 [[x,y,r],[x,y,r],...],一个轮廓多环、一次切出多个真圆孔,如法兰螺栓孔阵列)、" +
             "slot 腰孔/长圆孔({\"center\":[x,y],\"length\":总长,\"width\":宽,\"angle\":弧度?} 或简写 [x,y,长,宽];" +
             "【真圆弧】构造,两端是半圆不是折线)、" +
             "rect 两角点矩形、polygon 多边形点列、loops 多环。plane 支持 RefPlane_1/2/3、@别名(前面 plane op 建的)、obj-K。" +
+            "★ 参数化(可选,仅 rect/polygon/loops 直线环生效——圆/腰孔轮廓会忽略并回传 warnings):" +
+            "autoconstraint=true 按坐标自动补水平/垂直约束;fixorigin=true 固定首环首线起点(消平移自由度);" +
+            "dims=[{\"element\":0,\"name\":\"Len1\",\"value\":\"40 mm\"}] 给直线加长度标注并把它变成变量" +
+            "(element 为跨环扁平 0-based 线索引,轴不占位;也可用 \"formula\":\"Rad1 - 5 mm\" 建关联式)。" +
             "内部自动完成 画轮廓→端点闭合约束(仅直线需要/圆不需要)→End(0)→可见性隐藏→AddThroughNext/AddFinite 全链路," +
             "cut 方向由 side(ProfilePlaneSide=延伸方向) 与 profileside(ProfileSide=切轮廓内/外侧,默认 1) 共同决定:" +
             "调用方没显式给的维度,op 会自动按组合重试到几何正常;替代手工拼 se_invoke_chain 长链。示例见 ModelingTools.cs 类注释。" +
@@ -83,6 +104,7 @@ namespace SolidEdge.Spy.McpServer.Tools
             SolidEdgeContext context,
             [Description("特征列表(JSON 数组),每项见工具描述")] JsonElement[] features,
             [Description("起始对象句柄(零件文档),可省略;省略时用当前活动文档")] string objectId = null,
+            [Description("期望的文档名(可选守卫):与当前目标文档 Name 不符时立即拒绝、一个特征都不建,防误建到别的文档。强烈建议每次都传")] string expectDocument = null,
             [Description("true=只做静态校验并返回报告,不建任何特征(不启动 COM);默认 false")] bool dryRun = false)
         {
             try
@@ -122,6 +144,18 @@ namespace SolidEdge.Spy.McpServer.Tools
                             return Error("没有活动文档。请打开一个零件文档,或提供 objectId。");
                     }
 
+                    // 防误建守卫:目标文档名与期望不符时立即拒绝,一个特征都不建。
+                    // 污染事故(2026-09-22)的根因就是"以为的活动文档"≠"实际的活动文档"——
+                    // 把核对放进写操作的同一个 COM 调用内,才真正闭合 TOCTOU 时间窗口。
+                    if (!string.IsNullOrEmpty(expectDocument))
+                    {
+                        string actualName = TryGetDocName(doc);
+                        if (!string.Equals(actualName, expectDocument, StringComparison.OrdinalIgnoreCase))
+                            return Error("活动文档守卫:当前文档是 \"" + (actualName ?? "(无法读取)") +
+                                         "\",与 expectDocument \"" + expectDocument + "\" 不符,已拒绝建模(未建任何特征、零僵尸)。" +
+                                         "请先切换活动文档、或修正 expectDocument 后重试。");
+                    }
+
                     if (features == null || features.Length == 0)
                         return Error("features 不能为空。");
 
@@ -158,8 +192,20 @@ namespace SolidEdge.Spy.McpServer.Tools
                                 case "revolve":
                                     result = RevolveOp(context, doc, spec, name, namedPlanes);
                                     break;
+                                case "fillet":
+                                    result = FilletOp(context, doc, spec, name);
+                                    break;
+                                case "chamfer":
+                                    result = ChamferOp(context, doc, spec, name);
+                                    break;
+                                case "rib":
+                                    result = RibOp(context, doc, spec, name, namedPlanes);
+                                    break;
+                                case "pattern":
+                                    result = PatternOp(context, doc, spec, name, namedPlanes);
+                                    break;
                                 default:
-                                    result = new { op = op, name = name, status = "error", message = "未知 op(仅支持 plane/extrude/cut/revolve)。" };
+                                    result = new { op = op, name = name, status = "error", message = "未知 op(仅支持 plane/extrude/cut/revolve/fillet/chamfer/rib/pattern)。" };
                                     break;
                             }
                         }
@@ -204,10 +250,12 @@ namespace SolidEdge.Spy.McpServer.Tools
         /// 目的:把僵尸特征(调用成功但 Status=1216476311、几何没生成)的发现时点从事后提到事前。
         /// </summary>
         [McpServerTool, Description("声明式建模的静态校验:不建任何特征、不碰 Solid Edge,毫秒级检查 features JSON。" +
-            "拦四类问题——①结构:未知 op / 缺必填 / 字段类型错 / NaN / 单位疑似把 mm 当 m;" +
+            "拦五类问题——①结构:未知 op / 缺必填 / 字段类型错(含 dims 结构)/ NaN / 单位疑似把 mm 当 m;" +
             "②引用:plane 缺失 / RefPlane_N 越界 / @别名未定义或前向引用 / 别名重复;" +
             "③几何:环点数不足 / 相邻点重合 / 自交(报第几条边×第几条边)/ 退化面积 / 绕向不一致;" +
-            "④语义:除料前没有拉伸 / extrude 缺 depth / 同一平面多次 cut 未合并(必然僵尸)/ 除料落在毛坯外 / 环重叠。" +
+            "④语义:除料前没有拉伸 / extrude 缺 depth / 同一平面多次 cut 未合并(必然僵尸)/ 除料落在毛坯外 / 环重叠;" +
+            "⑤声明:autoConstraint/fixOrigin/dims 声明了但形状走不到应用路径(circle/circles/slot/plane 会被静默忽略)/ " +
+            "dims.element 越界或声明不完整(该标注与变量必然不建立)。" +
             "返回 status=ok|warning|error 与 issues 列表,每条带 code / level / feature 序号 / field / 中文 message / 结构化 fix。" +
             "有 error 时 se_model_build 会直接拒绝执行。SE 未启动也能调用,适合在动手前先跑一遍。")]
         public static string se_validate_features(
@@ -304,8 +352,9 @@ namespace SolidEdge.Spy.McpServer.Tools
                         feature = SafeString(Get(featObj, "Name")),
                         featureStatus = SafeLong(Get(featObj, "Status")),
                         faces = FacesCount(featObj),
+                        resolved = new { plane = "Face.ID=" + faceId, side = side, profileside = profileside, depth = depth },
                         handle = context.AddHandle(featObj, "ExtrudedProtrusion", SafeString(Get(featObj, "Name"))),
-                        hint = "Status=1216476310 正常;1216476311=几何未生成(僵尸),需检查草图是否落在实体/方向。"
+                        hint = "Status=1216476310 正常;1216476311=几何未生成(僵尸),需检查草图是否落在实体/方向。resolved = 本次实际生效的方向/参数。"
                     });
                 });
             }
@@ -412,11 +461,13 @@ namespace SolidEdge.Spy.McpServer.Tools
                 // (2026-09-13 实测:此处立刻回读 models.Item(1) 可能返回 null → NRE,必须用返回值)
                 // 通道必须走 Call(ManualInvoke):裸 InvokeMember(binder 直传数组)对
                 // SAFEARRAY(DISPATCH) 的 ProfileArray 必报 TYPEMISMATCH(0x80020005,
-                // 2026-09-17 三通道对照实测;extrude_rect_profile 配方走 chain 同通道
-                // ~90 次验证成功)。本方法枚举参数
+                // 2026-09-17 三通道对照实测;两线对该结论一致;extrude_rect_profile
+                // 配方走 chain 同通道 ~90 次验证成功)。本方法枚举参数
                 // (planeSide) 用 int 传不触发 VT_USERDEFINED 静默 null——那是 Revolve 的
-                // RefAxis 才有的问题,所以这里不能照搬 RevolveOp 的 PIA 方案(PIA 直调实测
-                // 返回僵尸 6311,同日实测)。
+                // RefAxis 才有的问题,所以这里不能照搬 RevolveOp 的 PIA 方案。
+                // ⚠️ 两线实测矛盾记录:远端 2026-09-14 曾测 PIA 强类型成功,本地 2026-09-17
+                // 同 API PIA 直调实测返回僵尸 6311(更新的测试)。裁决走 Call 通道,
+                // PIA 通道留待同环境复验(见 plan.md 待人工确认)。
                 object model = Call(models, "AddFiniteExtrudedProtrusion",
                     new object[] { 1, new object[] { profile }, side, depth });
                 object extrudes = Get(model, "ExtrudedProtrusions");
@@ -429,7 +480,8 @@ namespace SolidEdge.Spy.McpServer.Tools
                 featObj = Call(extrudes, "AddFinite", new object[] { profile, profileSide, side, depth });
             }
 
-            return FeatureResult("extrude", name, featObj, context, profile, null, specWarnings);
+            return FeatureResult("extrude", name, featObj, context, profile, null, specWarnings,
+                new { plane = spec.PlaneRef, side = side, profileside = profileSide, depth = depth });
         }
 
         private static object CutOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name,
@@ -451,38 +503,119 @@ namespace SolidEdge.Spy.McpServer.Tools
             object model = Get(models, "Item", 1);
             object cutouts = Get(model, "ExtrudedCutouts");
 
-            // ★ 方向自愈(2026-09-10 实测): cut "切哪一侧" 由 ProfileSide 和 ProfilePlaneSide 共同决定,
-            //   任一个取反都可能把料切到实体外 → 僵尸 6311。这里对【调用方没显式给】的维度做组合尝试,
-            //   取第一个几何正常的结果。两个都显式给了 = 完全听调用方的,不再猜。
-            //   注意:只能自愈"切到实体外(僵尸)";若两个方向都能切到料(合法但镜像),本层判不出来,仍需人工看渲染。
+            // ★ 方向自愈(2026-09-10/09-14 实测): cut "切哪一侧" 由 ProfileSide 和 ProfilePlaneSide 共同决定,
+            //   任一个取反都可能出问题。两层判定,对【调用方没显式给】的维度做组合尝试:
+            //     ① 僵尸(Status=6311)      = 料切到实体外,几何没生成;
+            //     ② 包围盒骤缩(见 IsCutSuspicious) = 几何生成了,但把轮廓【外侧】的料整块切掉,
+            //        实体只剩一根轮廓柱 —— 即"挖反"。这类失败 Status 完全正常,只看状态码判不出来。
+            //   两层都过 = 定案。两个方向都显式给了 = 完全听调用方的,不再猜。
+            //   ⚠️ 仍判不了的:两个方向都"切到料且都不缩小包围盒"的合法镜像(如沿轮廓切掉板的一半),
+            //      这种情况没有机器可辨的唯一解,只能靠调用方显式给方向或人工目检。
             bool psFree = !spec.ProfileSide.HasValue;
             bool ppsFree = !spec.Side.HasValue;
             int[] psList = psFree ? new[] { profileSide, profileSide == 1 ? 2 : 1 } : new[] { profileSide };
             int[] ppsList = ppsFree ? new[] { planeSide, planeSide == 1 ? 2 : 1 } : new[] { planeSide };
 
-            object profile = null;
-            object featObj = null;
-            bool built = false;
+            // 除料前基准:实体包围盒。用于识别"挖反"——把轮廓外侧的料切掉后实体只剩轮廓柱,
+            // 包围盒会骤缩(实测口径:60×40 板切 Ø12 贯通孔,正常盒≈板、挖反盒≈柱,体积差一个量级以上)。
+            // 判据为什么不用面数:L2 给的 `Body.Faces(FaceType=1).Count` 在圆孔场景不稳定
+            // (本构建下"板 + 贯通圆孔"实测 6 面,与纯板相同,面数不增),包围盒则必然变化。
+            double[] baseBox = TryModelRangeBox(doc);
+
             var specWarnings = new List<string>();
+            object bestProfile = null;
+            object bestFeat = null;
+            bool bestSuspicious = false;
+            bool healed = false;
+            int bestPs = profileSide;        // 实际生效的 ProfileSide,随候选一起记录(供 resolved 回传)
+            int bestPps = planeSide;         // 实际生效的 ProfilePlaneSide
+
             foreach (int ps in psList)
             {
                 foreach (int pps in ppsList)
                 {
-                    profile = CreateProfileForFeature(context, doc, plane, spec, visible, specWarnings);
-                    featObj = AddCutout(cutouts, profile, ps, pps, mode, spec);
+                    object profile = CreateProfileForFeature(context, doc, plane, spec, visible, specWarnings);
+                    object featObj = AddCutout(cutouts, profile, ps, pps, mode, spec);
 
                     long? st = SafeLong(Get(featObj, "Status"));
-                    if (!st.HasValue || st.Value != StatusZombie) { built = true; break; }
+                    if (st.HasValue && st.Value == StatusZombie)
+                    {
+                        // ① 这一组方向切到实体外了(僵尸):删掉特征和它的草图,换下一组重试。
+                        DiscardCutCandidate(profile, featObj);
+                        continue;
+                    }
 
-                    // 这一组方向切到实体外了:删掉特征和它的草图,换下一组重试。
-                    object oldSet = TryGetProfileSet(profile);
-                    TryDelete(featObj);
-                    if (oldSet != null) TryDelete(oldSet);
+                    // ② 几何生成了,再看是不是把料切没了(挖反)。
+                    bool suspicious = IsCutSuspicious(doc, baseBox);
+
+                    if (bestFeat == null)
+                    {
+                        bestProfile = profile;
+                        bestFeat = featObj;
+                        bestSuspicious = suspicious;
+                        bestPs = ps;
+                        bestPps = pps;
+                    }
+                    else if (!suspicious && bestSuspicious)
+                    {
+                        // 当前候选不可疑、已有候选可疑 → 换成这个(前面的挖反候选整个回滚)
+                        healed = true;
+                        DiscardCutCandidate(bestProfile, bestFeat);
+                        bestProfile = profile;
+                        bestFeat = featObj;
+                        bestSuspicious = false;
+                        bestPs = ps;
+                        bestPps = pps;
+                    }
+                    else
+                    {
+                        // 已有候选更可信(或两个都可疑,先来者优先)→ 丢弃这个
+                        DiscardCutCandidate(profile, featObj);
+                    }
+
+                    // 定案条件:找到一个不可疑的候选。可疑的才需要继续试其它方向组合。
+                    if (!bestSuspicious) break;
                 }
-                if (built) break;
+                if (bestFeat != null && !bestSuspicious) break;
             }
 
-            return FeatureResult("cut", name, featObj, context, profile, null, specWarnings);
+            // resolved:本次【实际生效】的方向。自愈会替调用方改方向,不回传的话调用方
+            // 根本不知道最终用了哪一组——"默认值"也就无从核对。
+            object cutResolved = new
+            {
+                plane = spec.PlaneRef,
+                side = bestPps,
+                profileside = bestPs,
+                mode = mode,
+                depth = string.Equals(mode, "finite", StringComparison.OrdinalIgnoreCase) ? (spec.Depth ?? 0.2) : (double?)null
+            };
+
+            if (bestFeat == null)
+            {
+                // ★ 所有方向组合都出僵尸。这里【绝不能】像旧实现那样把已删除的特征交给
+                //   FeatureResult:删除后的对象读 Status 会抛异常 → SafeLong 返回 null →
+                //   被当成"读不到状态但调用没报错"而判成功,于是返回一个已删对象的句柄 + status=ok。
+                return new
+                {
+                    op = "cut",
+                    name = name,
+                    status = "error",
+                    resolved = cutResolved,
+                    message = "除料在所有方向组合下都未生成几何(Status=" + StatusZombie + " 僵尸),已逐一回滚。" +
+                              "常见原因:草图画在默认 RefPlane 而非实体外表面的局部 RefPlane;或草图落在毛坯范围之外。",
+                    diagnosis = "除料没切到实体:检查 plane 是否选对、草图是否落在毛坯范围内。",
+                    fix = new { action = "fix_and_retry", check = new[] { "plane", "形状位置" } }
+                };
+            }
+
+            if (healed)
+                specWarnings.Add("首次尝试把轮廓【外侧】的料整块切掉(实体被切得只剩轮廓柱、包围盒骤缩)," +
+                                 "已自动换方向重试并成功。若要固定方向,请在 features 里显式指定 side / profileside。");
+            else if (bestSuspicious)
+                specWarnings.Add("除料后实体包围盒显著缩小(疑似切反了方向),但已无其它方向组合可试,已按首次成功的结果保留。" +
+                                 "请目检确认;必要时显式指定 side / profileside。");
+
+            return FeatureResult("cut", name, bestFeat, context, bestProfile, null, specWarnings, cutResolved);
         }
 
         /// <summary>按 mode 调对应的除料 API(切穿所有 / 定深 / 切到下一面),供 cut 首次尝试与方向翻转重试共用。</summary>
@@ -498,6 +631,65 @@ namespace SolidEdge.Spy.McpServer.Tools
                 default:
                     return Call(cutouts, "AddThroughNext", new object[] { profile, profileSide, planeSide });
             }
+        }
+
+        /// <summary>
+        /// 丢弃一个除料候选:删特征 + 删它所属的草图 ProfileSet。
+        /// 顺序必须是"先取 ProfileSet 再删特征"——特征一删,profile 常取不到 Parent(实测踩过,草图会漏删)。
+        /// 失败不抛:回滚失败别盖掉真正的原因。
+        /// </summary>
+        private static void DiscardCutCandidate(object profile, object featObj)
+        {
+            object profileSet = profile != null ? TryGetProfileSet(profile) : null;
+            if (featObj != null) TryDelete(featObj);
+            if (profileSet != null) TryDelete(profileSet);
+        }
+
+        /// <summary>
+        /// 读 Model 实体的包围盒(米)。走裸 IDispatch 读 "RangeBox",与 se_read_geometry 'model'
+        /// 是同一条通道(已实测);读不到返回 null,绝不抛。
+        ///
+        /// 为什么不复用本文件的 TryRangeBox:那个函数优先用 dynamic 绑定,是为"特征对象"调的;
+        /// 对 Model 走 IDispatch 更直接,也与验证过的 se_read_geometry 行为保持一致。
+        /// </summary>
+        private static double[] TryModelRangeBox(object doc)
+        {
+            try
+            {
+                object models = Get(doc, "Models");
+                if (Count(models) == 0) return null;
+                return TryBodyRangeBox(Get(models, "Item", 1));
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        /// <summary>包围盒体积(米³)。读不到、或退化(任一边长为 0) → -1。</summary>
+        private static double BoxVolume(double[] box)
+        {
+            if (box == null || box.Length < 6) return -1;
+            return Math.Abs(box[3] - box[0]) * Math.Abs(box[4] - box[1]) * Math.Abs(box[5] - box[2]);
+        }
+
+        /// <summary>
+        /// 判断这次除料是不是"挖反":把轮廓【外侧】的料整块切掉 → 实体只剩一根轮廓柱 → 包围盒骤缩。
+        /// 这补上了只看 Status 判据的盲区——挖反的特征 Status 完全正常,旧实现会当成功返回。
+        ///
+        /// 阈值比 0.5 有实测余量(是数量级差距,不是踩线判定,不敏感):
+        ///   60×40×10 板中心切 Ø12 贯通孔 —— 正常:盒≈板(比值≈0.95);挖反:盒≈柱(比值≈0.06)。
+        ///
+        /// ★ 读不到除料前基准、或读不到当前盒时【一律不判】(返回 false) → 退化为"第一个非僵尸即用"
+        ///   的既有行为。宁可漏判也不误判:误判会把调用方合法的"切掉一大块"结果改掉。
+        /// </summary>
+        private static bool IsCutSuspicious(object doc, double[] baseBox)
+        {
+            double bv = BoxVolume(baseBox);
+            if (bv <= 0) return false;
+            double nv = BoxVolume(TryModelRangeBox(doc));
+            if (nv < 0) return false;
+            return nv < bv * 0.5;
         }
 
         /// <summary>
@@ -541,8 +733,13 @@ namespace SolidEdge.Spy.McpServer.Tools
             object profile = pair[0];
             object refAxis = pair[1];
 
+            bool isRevolveCut = string.Equals(spec.Mode, "cut", StringComparison.OrdinalIgnoreCase);
             int profileSide = spec.ProfileSide ?? 1;      // ProfileSide
-            int planeSide = spec.Side ?? 2;               // ProfilePlaneSide
+            // ★ 2026-09-22 本机实测(零件3 全矩阵):ProfilePlaneSide 默认值必须按 op 类型分——
+            //   凸台 side=1 三基准面(RP1/RP2/RP3)全通,side=2 在 RP2 稳定僵尸 6311(4/4);
+            //   除料 side=2 才切到实体(faces=12),side=1 反向切空稳定僵尸(诊断"除料没切到实体")。
+            //   显式 spec.Side 仍可覆盖。
+            int planeSide = spec.Side ?? (isRevolveCut ? 2 : 1);   // ProfilePlaneSide
             double angle = RevolveAngle(spec);            // 默认 2π(360°)
 
             object models = Get(doc, "Models");
@@ -551,8 +748,7 @@ namespace SolidEdge.Spy.McpServer.Tools
             //   所以 model/revolves 的获取必须整个条件化。
             object model = null;
             object revolves = null;
-            // "旋转切割" = RevolvedCutout;其余(含缺省)走旋转凸台 RevolvedProtrusion
-            bool isRevolveCut = string.Equals(spec.Mode, "cut", StringComparison.OrdinalIgnoreCase);
+            // "旋转切割" = RevolvedCutout;其余(含缺省)走旋转凸台 RevolvedProtrusion(isRevolveCut 在上方 side 默认值处判定)
             if (!firstFeature)
             {
                 model = Get(models, "Item", 1);
@@ -599,7 +795,8 @@ namespace SolidEdge.Spy.McpServer.Tools
             }
 
             string kindOverride = isRevolveCut ? "RevolvedCutout" : "RevolvedProtrusion";
-            return FeatureResult("revolve", name, featObj, context, profile, kindOverride, specWarnings);
+            return FeatureResult("revolve", name, featObj, context, profile, kindOverride, specWarnings,
+                new { plane = spec.PlaneRef, side = planeSide, profileside = profileSide, angle = angle, mode = isRevolveCut ? "cut" : "protrusion" });
         }
 
         /// <summary>旋转角:degrees(度)优先并换算成弧度,其次 angle(弧度),都没有则 2π(整圈)。</summary>
@@ -608,6 +805,328 @@ namespace SolidEdge.Spy.McpServer.Tools
             if (spec.Degrees.HasValue) return spec.Degrees.Value * Math.PI / 180.0;
             if (spec.Angle.HasValue) return spec.Angle.Value;
             return 2.0 * Math.PI;
+        }
+
+        // ---------------- 扩 op(2026-09-22):fillet / chamfer / rib / pattern ----------------
+        // 依据:docs/对比分析/SolidEdge-MCP-验证API对照表.md(对方 SE2026 真机验证 + SE2022 官方文档核实)
+        // 边引用:face:<Face.ID>(唯一稳定索引,L2 modeling-recipes §七)+ 面内 0-based 边索引。
+        // 校验双保险:Status 之外,再加 Rounds/Chamfers/Patterns 集合 Count 增长判据
+        // (移植对方 verifies_collection_growth——圆角/倒角不改面数,只看 Status 有盲区)。
+
+        /// <summary>圆角:Model.Rounds.Add(n, edgeArray, radiusArray),每条边独立 set。</summary>
+        private static object FilletOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name)
+        {
+            if (!spec.Radius.HasValue || spec.Radius.Value <= 0)
+                return new { op = "fillet", name = name, status = "error",
+                    message = "fillet 必须提供 radius(米,且 > 0)。" };
+
+            object edgeErr = null;
+            var edgeObjs = ResolveEdgeRefs(doc, spec, out edgeErr);
+            if (edgeObjs == null)
+                return new { op = "fillet", name = name, status = "error", message = edgeErr };
+
+            object models = Get(doc, "Models");
+            object rounds = Get(Get(models, "Item", 1), "Rounds");
+            int before = Count(rounds);
+
+            Array edgeArr = edgeObjs.ToArray();
+            var radiusArr = new double[edgeObjs.Count];
+            for (int i = 0; i < radiusArr.Length; i++) radiusArr[i] = spec.Radius.Value;
+
+            // PIA 强类型调用(官方示例 SolidEdgePart~Rounds~Add.html 的 C# 标签页同款写法)
+            object feat = ((SolidEdgePart.Rounds)rounds).Add(edgeArr.Length, edgeArr, radiusArr);
+
+            return FinishEdgeFeature("fillet", name, context, feat, rounds, before,
+                new { radius = spec.Radius.Value, edges = spec.Edges });
+        }
+
+        /// <summary>倒角(首版只做等距):Model.Chamfers.AddEqualSetback(n, edgeArray, distance)。</summary>
+        private static object ChamferOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name)
+        {
+            if (!spec.HasDistance || spec.Distance <= 0)
+                return new { op = "chamfer", name = name, status = "error",
+                    message = "chamfer 必须提供 distance(米,且 > 0)。非 45° 角度/不等距版本暂未开放。" };
+
+            object edgeErr = null;
+            var edgeObjs = ResolveEdgeRefs(doc, spec, out edgeErr);
+            if (edgeObjs == null)
+                return new { op = "chamfer", name = name, status = "error", message = edgeErr };
+
+            object models = Get(doc, "Models");
+            object chamfers = Get(Get(models, "Item", 1), "Chamfers");
+            int before = Count(chamfers);
+
+            Array edgeArr = edgeObjs.ToArray();
+
+            // PIA 强类型;距离单位米。注意:若后续开放角度版,Angle 的单位是【度】(L2 §五实测),别套弧度。
+            object feat = ((SolidEdgePart.Chamfers)chamfers).AddEqualSetback(edgeArr.Length, edgeArr, spec.Distance);
+
+            return FinishEdgeFeature("chamfer", name, context, feat, chamfers, before,
+                new { distance = spec.Distance, edges = spec.Edges });
+        }
+
+        /// <summary>
+        /// 筋板:Model.Ribs.Add(profile, igExtend, igThkNormalToProfilePlane, MaterialSide, igSymmetric, thickness)。
+        /// ★ SE 2022 实测(2026-09-22 沙盒,36 组合):【闭合轮廓】才能出几何(画在体表面所在的
+        ///   平面上,如板底面 RefPlane_1,MaterialSide=igRight 朝材料侧);经典 UI 的【开放链】
+        ///   画法经此 COM 通道一律 6311 僵尸(30+ 组合含 Recompute 后复读全灭)。
+        ///   效果 = 以轮廓为界长出的薄台(厚度方向 = 轮廓面法向,igSymmetric 对称)。
+        /// MaterialSide 沿用 cut 的方向自愈思路:没显式给时僵尸就换侧重试。
+        /// </summary>
+        private static object RibOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name,
+            Dictionary<string, object> namedPlanes)
+        {
+            if (!spec.Thickness.HasValue || spec.Thickness.Value <= 0)
+                return new { op = "rib", name = name, status = "error",
+                    message = "rib 必须提供 thickness(米,且 > 0)。" };
+            if (spec.HasCircle || spec.HasCircles || spec.HasSlot || spec.Loops.Count > 0)
+            {
+                // 形状可用,继续
+            }
+            else
+            {
+                return new { op = "rib", name = name, status = "error",
+                    message = string.IsNullOrEmpty(spec.ShapeError)
+                        ? "rib 需要【闭合】轮廓(rect/polygon/loops/circle)。SE 2022 的 Ribs.Add 通道不支持开放链。"
+                        : spec.ShapeError };
+            }
+
+            object models = Get(doc, "Models");
+            if (Count(models) == 0)
+                return new { op = "rib", name = name, status = "error", message = "rib 前必须先有实体(extrude)——筋板要长在已有几何上。" };
+
+            object plane = ResolvePlane(context, doc, spec.PlaneRef, namedPlanes);
+            bool visible = spec.Visible ?? false;
+
+            var specWarnings = new List<string>();
+            object ribs = Get(Get(models, "Item", 1), "Ribs");
+
+            // 方向自愈:MaterialSide(igRight=2 默认)没显式给时,僵尸就换 igLeft=1 重试
+            int ms = spec.Side ?? 2;
+            bool msFree = !spec.Side.HasValue;
+            object feat = null;
+            object profile = null;
+            int usedMs = ms;
+            int attempts = msFree ? 2 : 1;
+            for (int attempt = 0; attempt < attempts; attempt++)
+            {
+                int candidate = attempt == 0 ? ms : (ms == 2 ? 1 : 2);
+                var specWarningsTry = new List<string>();
+                profile = CreateProfileForFeature(context, doc, plane, spec, visible, specWarningsTry);
+                feat = ((SolidEdgePart.Ribs)ribs).Add((SolidEdgePart.Profile)profile,
+                    SolidEdgePart.FeaturePropertyConstants.igExtend,
+                    SolidEdgePart.FeaturePropertyConstants.igThkNormalToProfilePlane,
+                    (SolidEdgePart.FeaturePropertyConstants)candidate,
+                    SolidEdgePart.FeaturePropertyConstants.igSymmetric,
+                    spec.Thickness.Value);
+                long? st = SafeLong(Get(feat, "Status"));
+                if (st.HasValue && st.Value != StatusZombie) { usedMs = candidate; break; }
+                if (attempt < attempts - 1)
+                {
+                    // 换侧重试:丢弃当前候选(特征+草图),下一轮重建轮廓
+                    DiscardCutCandidate(profile, feat);
+                    feat = null;
+                }
+            }
+
+            var resolved = new { plane = spec.PlaneRef, thickness = spec.Thickness.Value, materialSide = usedMs };
+            if (feat == null)
+            {
+                return new
+                {
+                    op = "rib",
+                    name = name,
+                    status = "error",
+                    resolved = resolved,
+                    message = "rib 在两个材料侧都未生成几何(6311 僵尸),已逐一回滚。" +
+                              "SE 2022 实测:轮廓必须是【闭合】的,且应画在【实体表面所在/贴合】的平面上" +
+                              "(如板底面用 RefPlane_1),材料侧要有料。",
+                    diagnosis = "检查轮廓是否闭合、plane 是否贴合实体表面、材料侧(igRight)是否朝向实体。",
+                    fix = new { action = "fix_and_retry", check = new[] { "plane", "轮廓闭合", "side" } }
+                };
+            }
+
+            return FeatureResult("rib", name, feat, context, profile, "Rib", specWarnings, resolved);
+        }
+
+        /// <summary>
+        /// 矩形阵列:SE 2022 的 Patterns.AddByRectangular 经实测【系统性 E_FAIL 不可达】
+        /// (2026-09-22 沙盒,除料/圆角/倒角/筋板 4 类种子 × 2 个 PatternMethod × 2 个 ReferenceIndex
+        ///  共 16+ 组合,强类型 PIA 通道全灭;晚绑定通道则报 TYPEMISMATCH——对方项目也从未
+        /// 验证过非 Ex 版,其 2026 的 OK 证据来自 AddByRectangularEx,而 SE 2022 没有 Ex 版)。
+        /// 所以本 op 不碰 COM,直接诚实拒绝(照对方装配级 pattern 的 unsupported 模板)。
+        /// 替代方案:多孔阵列用【一个 cut 的 circles 多真圆】一次切完;多凸台重复给 extrude 特征。
+        /// </summary>
+        private static object PatternOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name,
+            Dictionary<string, object> namedPlanes)
+        {
+            return new
+            {
+                op = "pattern",
+                name = name,
+                status = "error",
+                unsupported = true,
+                message = "pattern 在 SE 2022 的 COM 通道不可用:Patterns.AddByRectangular 对所有种子特征" +
+                          "(除料/凸台/圆角/倒角/筋板)一律 E_FAIL(16+ 组合实测,2026-09-22 沙盒)," +
+                          "而 2025/2026 可用的 AddByRectangularEx 在 SE 2022 不存在。本 op 已诚实拒绝,不碰 COM。",
+                alternatives = new[]
+                {
+                    "多孔阵列:一个 cut + circles 多真圆([[x,y,r],...])一次切完(如法兰螺栓孔)",
+                    "多凸台:在 features 里逐个给出 extrude 特征(坐标错开)",
+                    "圆形阵列:同理用 circles 按极坐标给圆心"
+                },
+                fix = new { action = "use_alternative", see = "alternatives" }
+            };
+        }
+
+        /// <summary>
+        /// fillet/chamfer/pattern 的统一收尾:Status 校验(FeatureResult)之外,再验证
+        /// 对应特征集合 Count 确实增长——"Status OK 但集合没长大"= 没作用到任何几何,判失败回滚。
+        /// </summary>
+        private static object FinishEdgeFeature(string op, string name, SolidEdgeContext context, object feat,
+            object collection, int countBefore, object resolved)
+        {
+            int countAfter = Count(collection);
+            if (countAfter <= countBefore)
+            {
+                TryDelete(feat);
+                return new
+                {
+                    op = op,
+                    name = name,
+                    status = "error",
+                    feature = SafeString(Get(feat, "Name")),
+                    rolledBack = true,
+                    resolved = resolved,
+                    message = op + " 调用返回了特征,但 " + (op == "pattern" ? "Patterns" : op == "fillet" ? "Rounds" : "Chamfers") +
+                              " 集合数量未增长(before=" + countBefore + ", after=" + countAfter + ")——没有作用到任何几何,已回滚。" +
+                              "常见原因:引用的边不合适(相切中性边不能倒圆)或参数超界。",
+                    diagnosis = op == "pattern"
+                        ? "阵列特征未生成:检查被阵列特征是否可阵列、plane 与间距是否合理。"
+                        : "圆角/倒角未生成:检查边引用是否选对(face:ID 是否还在——几何变更后 Face.ID 可能变化)、半径/距离是否超过相邻面大小。",
+                    fix = new { action = "fix_and_retry", check = new[] { "edges", op == "fillet" ? "radius" : op == "chamfer" ? "distance" : "of/plane/spacing" } }
+                };
+            }
+            return FeatureResult(op, name, feat, context, null,
+                op == "fillet" ? "Round" : op == "chamfer" ? "Chamfer" : "Pattern", null, resolved);
+        }
+
+        /// <summary>
+        /// 解析 edges 声明为 COM 边对象列表。任一条失败即整体失败(返回 null + error 消息)——
+        /// 部分成功会让用户搞不清哪条边生效了。错误消息带可用面 ID 列表,学对方的"诚实报错"。
+        /// </summary>
+        private static List<object> ResolveEdgeRefs(object doc, FeatureSpec spec, out object error)
+        {
+            error = null;
+            if (!spec.HasEdges || spec.Edges.Count == 0)
+            {
+                error = "缺少 edges(边引用数组,每项 {\"face\":\"face:<Face.ID>\",\"edge\":0-based})。";
+                return null;
+            }
+
+            object models = Get(doc, "Models");
+            if (Count(models) == 0) { error = "没有模型实体——圆角/倒角要作用在已有实体上(先 extrude)。"; return null; }
+            object model = Get(models, "Item", 1);
+
+            var result = new List<object>();
+            var badRefs = new List<string>();
+            int faceCountTotal = -1;
+            var availableIds = new List<int>();
+
+            foreach (var er in spec.Edges)
+            {
+                if (er.ParseError != null)
+                {
+                    badRefs.Add("edge 引用解析失败:" + er.ParseError);
+                    continue;
+                }
+
+                object face = FindFaceById(model, er.FaceId, out faceCountTotal, availableIds);
+                if (face == null)
+                {
+                    badRefs.Add("未找到 Face.ID=" + er.FaceId + " 的面(共 " + faceCountTotal + " 个面)。");
+                    continue;
+                }
+
+                object edges;
+                try { edges = Get(face, "Edges"); }
+                catch { edges = ((SolidEdgeGeometry.Face)face).Edges; }
+                int edgeCount = Count(edges);
+                if (er.EdgeIndex >= edgeCount)
+                {
+                    badRefs.Add("Face.ID=" + er.FaceId + " 只有 " + edgeCount + " 条边,edge=" + er.EdgeIndex + " 越界(0-based)。");
+                    continue;
+                }
+
+                result.Add(Get(edges, "Item", er.EdgeIndex + 1));
+            }
+
+            if (badRefs.Count > 0)
+            {
+                error = string.Join(";", badRefs) +
+                        " 提示:face 用 se_read_geometry 或 se_describe_object 查 Face.ID;几何变更后 Face.ID 一般不变,但被完全覆盖的面会换新 ID。";
+                return null;
+            }
+            return result;
+        }
+
+        /// <summary>在 Model.Body 的所有 Shell 里按 Face.ID 找面(与 se_extrude_on_face 同判据)。</summary>
+        private static object FindFaceById(object model, int faceId, out int faceCountTotal, List<int> availableIds)
+        {
+            faceCountTotal = 0;
+            object body = Get(model, "Body");
+            object shells = Get(body, "Shells");
+            int shellCount = Count(shells);
+            for (int s = 1; s <= shellCount; s++)
+            {
+                object faces = Get(Get(shells, "Item", s), "Faces");
+                int n = Count(faces);
+                faceCountTotal += n;
+                for (int i = 1; i <= n; i++)
+                {
+                    object f = Get(faces, "Item", i);
+                    int id = SafeInt(Get(f, "ID"));
+                    if (availableIds != null && availableIds.Count < 20) availableIds.Add(id);
+                    if (id == faceId) return f;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>按名字找特征:先查 obj-K 句柄,再扫常用特征集合的 Name(学对方 DesignEdgebarFeatures 遍历思路)。</summary>
+        private static object FindFeatureByName(SolidEdgeContext context, object doc, string of, out object model)
+        {
+            model = null;
+            if (string.IsNullOrEmpty(of)) return null;
+
+            if (of.StartsWith("obj-", StringComparison.OrdinalIgnoreCase))
+            {
+                var h = context.GetHandle(of);
+                if (h != null && h.ComObject != null)
+                {
+                    try { model = Get(h.ComObject, "Parent"); } catch { }
+                    return h.ComObject;
+                }
+                return null;
+            }
+
+            object models = Get(doc, "Models");
+            if (Count(models) == 0) return null;
+            model = Get(models, "Item", 1);
+
+            foreach (var collName in new[] { "ExtrudedProtrusions", "ExtrudedCutouts", "RevolvedProtrusions", "RevolvedCutouts", "Rounds", "Chamfers", "Ribs", "Holes" })
+            {
+                object coll;
+                try { coll = Get(model, collName); } catch { continue; }
+                int n = Count(coll);
+                for (int i = 1; i <= n; i++)
+                {
+                    object item = Get(coll, "Item", i);
+                    string nm = SafeString(Get(item, "Name"));
+                    if (string.Equals(nm, of, StringComparison.OrdinalIgnoreCase)) return item;
+                }
+            }
+            return null;
         }
 
         /// <summary>
@@ -667,26 +1186,58 @@ namespace SolidEdge.Spy.McpServer.Tools
             return new object[] { profile, refAxis };
         }
 
-        /// <summary>读取特征的全局包围盒 [xmin,ymin,zmin,xmax,ymax,zmax](米),用于诊断坐标。</summary>
+        /// <summary>
+        /// 读包围盒 [xmin,ymin,zmin,xmax,ymax,zmax](米),用于诊断坐标。
+        ///
+        /// ★ 2026-09-14 修正:特征对象**本身没有 RangeBox 成员** —— 查 SDK
+        ///   `SolidEdgePart~ExtrudedProtrusion_members.html` 对 RangeBox 是 **0 命中**,
+        ///   所以原实现(先 dynamic 绑定、再裸 IDispatch 读,两条路都读特征自己)必然失败、
+        ///   恒返 null:不是"读崩了",而是这个属性在特征上根本不存在。
+        ///   改为读**它的宿主**(Parent,即所属 Model)的 RangeBox —— 那才是有诊断价值的范围。
+        ///   仍读不到就返回 null(不猜、不误报)。
+        ///   ⚠️ `Parent` 具体返回 Model 还是 Features 集合**尚未实机标定**;若不是 Model,
+        ///      这里会安静地退回 null(与修正前行为一致),不会有副作用。
+        /// </summary>
         private static double[] TryRangeBox(object featObj)
         {
+            object host = null;
+            try { host = Get(featObj, "Parent"); } catch { }
+            return TryBodyRangeBox(host != null ? host : featObj);
+        }
+
+        /// <summary>
+        /// 读宿主(Model)实体的包围盒,走**官方 `Body.GetRange`**(2026-09-14 修正的核心)。
+        ///
+        /// ★ 为什么不能用 `RangeBox`:全 SDK 查不到零件侧的 `RangeBox` 成员
+        ///   (`ExtrudedProtrusion_members.html` / `Model_members.html` 均 **0 命中**;
+        ///    `RangeBox` 只出现在钣金 `ShowRangeBox`(显示开关)与装配
+        ///    `Occurrence.GetRangeBox()`(方法)里)→ 原实现读 `RangeBox` **必然恒返 null**,
+        ///    不是"读崩了"而是根本没有这个属性。
+        /// ★ 官方写法(`SolidEdgeGeometry~Body~GetRange.html` 的 C# 示例):
+        ///     var body = (SolidEdgeGeometry.Body)model.Body;
+        ///     var minPt = Array.CreateInstance(typeof(double), 0);
+        ///     var maxPt = Array.CreateInstance(typeof(double), 0);
+        ///     body.GetRange(ref minPt, ref maxPt);   // 两个 ByRef Double() out 参数
+        ///   Remarks:返回的盒边平行于全局坐标系。实测 `Body.Vertices.Count=8`、
+        ///   `Body.Faces(1).Count=6`,Body 对象可正常取到。
+        /// </summary>
+        private static double[] TryBodyRangeBox(object host)
+        {
+            if (host == null) return null;
             try
             {
-                dynamic d = featObj;
-                var rb = (double[])d.RangeBox;
-                if (rb != null && rb.Length >= 6)
-                    return new[] { rb[0], rb[1], rb[2], rb[3], rb[4], rb[5] };
-            }
-            catch { }
-            try
-            {
-                object o = Get(featObj, "RangeBox");
-                if (o is Array a && a.Length >= 6)
+                object bodyObj = Get(host, "Body");
+                if (bodyObj == null) return null;
+                var body = (SolidEdgeGeometry.Body)bodyObj;
+                Array minPt = Array.CreateInstance(typeof(double), 0);
+                Array maxPt = Array.CreateInstance(typeof(double), 0);
+                body.GetRange(ref minPt, ref maxPt);
+                if (minPt != null && maxPt != null && minPt.Length >= 3 && maxPt.Length >= 3)
                 {
                     return new[]
                     {
-                        Convert.ToDouble(a.GetValue(0)), Convert.ToDouble(a.GetValue(1)), Convert.ToDouble(a.GetValue(2)),
-                        Convert.ToDouble(a.GetValue(3)), Convert.ToDouble(a.GetValue(4)), Convert.ToDouble(a.GetValue(5))
+                        Convert.ToDouble(minPt.GetValue(0)), Convert.ToDouble(minPt.GetValue(1)), Convert.ToDouble(minPt.GetValue(2)),
+                        Convert.ToDouble(maxPt.GetValue(0)), Convert.ToDouble(maxPt.GetValue(1)), Convert.ToDouble(maxPt.GetValue(2))
                     };
                 }
             }
@@ -697,6 +1248,43 @@ namespace SolidEdge.Spy.McpServer.Tools
         // ---------------- 公共封装 ----------------
 
         /// <summary>
+        /// 读内嵌轮廓"是否欠约束"。true=欠约束 / false=完全约束 / null=读不到(不猜)。
+        ///
+        /// 判据来源(2026-09-14 实测):`IsUnderDefined` 名义上挂在 Sketch 上,而本工具走的是
+        /// `ProfileSets.Add().Profiles.Add(plane)` 内嵌轮廓 —— 它**不产生 Sketch 节点**
+        /// (实测该文档 `Sketches.Count` 恒为 0),看路径像是读不到。但实测 `Profile`(49 个属性)
+        /// 虽无此成员,它的**宿主 `ProfileSet` 上就有 `IsUnderDefined`** —— 而本类建轮廓时手里
+        /// 正持有 ProfileSet。所以走 `profile.Parent` 即可,不必改用独立 Sketch(那会多出
+        /// Sketch 特征节点,与既有配方冲突)。
+        ///
+        /// ⚠️ 判据敏感性已有实测佐证:`sandbox_reset` 那块板(4 条线 + 端点/水平垂直约束、
+        ///    **没加尺寸**)读出来是 True(欠约束)——与"还剩 2 个自由度"的预期一致。
+        /// ⚠️ 反面尚未标定:声明完整约束后是否真能变 False(此前被 ExtrudeOp 首特征通道 bug
+        ///    挡住,建不出特征就无从读),待后续实测。
+        /// </summary>
+        private static bool? TryUnderDefined(object profile)
+        {
+            if (profile == null) return null;
+            try
+            {
+                object ps = Get(profile, "Parent");
+                if (ps == null) return null;
+                return Convert.ToBoolean(Get(ps, "IsUnderDefined"));
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>安全读集合 Count:读不到返回 -1(用 -1 区分"0 个"与"读不到")。</summary>
+        private static int SafeCount(object obj, string member)
+        {
+            try { return Convert.ToInt32(Get(Get(obj, member), "Count")); }
+            catch { return -1; }
+        }
+
+        /// <summary>
         /// 所有建模 op 的统一出口——【内置强制校验】:
         /// 特征建完立刻读 Status,不等于 StatusOk 就判失败,并【自动删除该特征】回滚,
         /// 不让僵尸特征留在模型树上(留着会污染模型树、误导后续特征)。
@@ -705,7 +1293,8 @@ namespace SolidEdge.Spy.McpServer.Tools
         /// 也不用记得自己去检查——验证固化在 op 里,对调用方无感。
         /// </summary>
         private static object FeatureResult(string op, string name, object featObj, SolidEdgeContext context,
-            object profile = null, string kindOverride = null, List<string> specWarnings = null)
+            object profile = null, string kindOverride = null, List<string> specWarnings = null,
+            object resolved = null)
         {
             string featureName = SafeString(Get(featObj, "Name"));
             long? status = SafeLong(Get(featObj, "Status"));
@@ -736,6 +1325,7 @@ namespace SolidEdge.Spy.McpServer.Tools
                     featureStatus = status.Value,
                     rolledBack = rolledBack,
                     sketchCleaned = sketchCleaned,
+                    resolved = resolved,
                     message = reason + ":Status=" + status.Value + "(正常应为 " + StatusOk + ");" +
                               (rolledBack ? "已自动删除该特征" : "自动删除失败,请手动删除该僵尸特征") +
                               (profile == null ? "。" : (sketchCleaned ? ",并清理了它的草图。" : ",但草图清理失败。")),
@@ -749,6 +1339,18 @@ namespace SolidEdge.Spy.McpServer.Tools
                 : (op == "revolve" ? "RevolvedProtrusion" : "ExtrudedProtrusion"));
             string handleId = context.AddHandle(featObj, kind, featureName);
 
+            // ★ 轮廓约束状态(2026-09-14 新增):把"草图到底锁没锁住"从隐式变成显式。
+            //   欠约束不算错误(几何已按给定坐标成形),但它意味着 SE 语义上没锁死 ——
+            //   改一个尺寸、或局部面索引漂移时,几何可能整片走位,而调用方从返回值看不出任何征兆。
+            bool? underDefined = TryUnderDefined(profile);
+            List<string> warningsOut = specWarnings;
+            if (underDefined == true)
+            {
+                warningsOut = (specWarnings == null) ? new List<string>() : new List<string>(specWarnings);
+                warningsOut.Add("轮廓仍欠约束(ProfileSet.IsUnderDefined=True):几何已按坐标成形,但 SE 语义上未完全锁死," +
+                                "后续改尺寸或局部面索引漂移时可能整片移位。要完全约束请用 autoconstraint+fixorigin,或补 dims/约束。");
+            }
+
             return new
             {
                 op = op,
@@ -758,10 +1360,19 @@ namespace SolidEdge.Spy.McpServer.Tools
                 featureStatus = status,
                 faces = FacesCount(featObj),
                 rangebox = TryRangeBox(featObj),
+                resolved = resolved,
+                constraint = (profile == null) ? null : new
+                {
+                    underDefined = underDefined,   // true=欠约束 / false=完全约束 / null=读不到(不猜)
+                    relations = SafeCount(profile, "Relations2d"),
+                    dimensions = SafeCount(profile, "Dimensions")
+                },
                 handle = handleId,
                 verified = true,
-                warnings = (specWarnings != null && specWarnings.Count > 0) ? specWarnings : null,
-                hint = "已内置校验(仅 Status=" + StatusOk + " 才返回 ok)。"
+                warnings = (warningsOut != null && warningsOut.Count > 0) ? warningsOut : null,
+                hint = "已内置校验(仅 Status=" + StatusOk + " 才返回 ok)。resolved = 本次【实际生效】的方向/参数" +
+                       "(省略的参数由工具自愈选定);要固定行为请显式传 side / profileside。" +
+                       "constraint.underDefined = 轮廓是否完全约束(为 true 时见 warnings)。"
             };
         }
 
@@ -849,13 +1460,22 @@ namespace SolidEdge.Spy.McpServer.Tools
         private static object CreateProfileForFeature(SolidEdgeContext context, object doc, object plane, FeatureSpec spec, bool visible, List<string> specWarnings)
         {
             if (spec.HasCircle)
+            {
+                WarnIfDeclarationsIgnored(spec, specWarnings, "circle");
                 return CreateProfileCircle(doc, plane, spec.CircleX, spec.CircleY, spec.CircleR, visible);
+            }
 
             if (spec.HasCircles)
+            {
+                WarnIfDeclarationsIgnored(spec, specWarnings, "circles");
                 return CreateProfileCircles(doc, plane, spec.Circles, visible);
+            }
 
             if (spec.HasSlot)
+            {
+                WarnIfDeclarationsIgnored(spec, specWarnings, "slot");
                 return CreateProfileSlot(doc, plane, spec, visible);
+            }
 
             // 形状解析失败时在这里抛(与改造前 ParseLoops 抛异常的时机一致),
             // 由 se_model_build 的 per-feature try/catch 转成 status=error。
@@ -863,6 +1483,25 @@ namespace SolidEdge.Spy.McpServer.Tools
                 throw new ArgumentException(spec.ShapeError);
 
             return CreateProfileMulti(context, doc, plane, spec, visible, specWarnings);
+        }
+
+        /// <summary>
+        /// 圆 / circles / slot 轮廓走不到 <see cref="ApplySpecConstraints"/>(那是直线环专属路径),
+        /// 声明的 autoConstraint / fixOrigin / dims 会被静默忽略——这里补一条 warning。
+        /// 与静态校验的 W406 对应:那条报在灌进 SE 之前,这条报在真建的时候(兜底,防止绕过校验)。
+        /// </summary>
+        private static void WarnIfDeclarationsIgnored(FeatureSpec spec, List<string> warnings, string shape)
+        {
+            if (warnings == null || spec == null) return;
+
+            var names = new List<string>();
+            if (spec.AutoConstraint == true) names.Add("autoConstraint");
+            if (spec.FixOrigin == true) names.Add("fixOrigin");
+            if (spec.Dims != null && spec.Dims.Count > 0) names.Add("dims(" + spec.Dims.Count + " 条)");
+            if (names.Count == 0) return;
+
+            warnings.Add("shape=" + shape + " 走不到约束/标注应用路径(仅 rect/polygon/loops 直线环支持)," +
+                "已忽略 " + string.Join("、", names) + "——该轮廓不会被尺寸驱动,变量也不会进变量表。");
         }
 
         /// <summary>
@@ -1089,11 +1728,18 @@ namespace SolidEdge.Spy.McpServer.Tools
             catch { return 0; }
         }
 
-        /// <summary>写属性(属性名 + 值)。建模 IR 的 autoConstraint/dims 需要(Constraint 等)。</summary>
+        /// <summary>
+        /// 写属性(属性名 + 值)。建模 IR 的 autoConstraint/dims 需要(Constraint 等)。
+        ///
+        /// ★ 2026-09-14 修正:原实现走 `obj.GetType().InvokeMember(..., SetProperty, ...)` 反射。
+        ///   对 COM RCW,`GetType()` 拿到的是 `__ComObject` 而不是真实接口类型,反射写属性
+        ///   不可靠(本文件其它调用早已统一走裸 IDispatch,只有这里漏了)。改走
+        ///   `ManualInvoke.TryInvokeSet`(DISPATCH_PROPERTYPUT),与 `Get`/`Call` 同一条路。
+        /// </summary>
         private static void Put(object obj, string name, object value)
         {
-            obj.GetType().InvokeMember(name, BindingFlags.SetProperty, null, obj,
-                new object[] { value }, null, CultureInfo.InvariantCulture, null);
+            if (ManualInvoke.TryInvokeSet(obj, name, value, out var err)) return;
+            throw err ?? new Exception("IDispatch 写属性失败: " + name);
         }
 
         /// <summary>
@@ -1147,8 +1793,28 @@ namespace SolidEdge.Spy.McpServer.Tools
                 {
                     object dim = Call(dimsCol, "AddLength", new object[] { loopLines[ds.Element].line });
                     Put(dim, "Constraint", true);
-                    Call(varsObj, "PutName", new object[] { dim, ds.Name });
-                    Call(varsObj, "Edit", new object[] { ds.Name, ds.Value ?? ds.Formula });
+
+                    // ★ 2026-09-14:PutName / Edit 改走 PIA 强类型(官方示例同款)。
+                    //   原实现走裸 IDispatch,实测报 DISP_E_EXCEPTION(hr=0x80020009, puArgErr=0
+                    //   = 第 1 个参数) —— 尺寸名与 value 都写不进去(驱动化本身不受影响)。
+                    //   官方 WorkingWithDimensions.html 的示例是这个顺序:
+                    //     objVariables.PutName(objDimension1, "Dimension1")   ' 给尺寸命名
+                    //     sName = objVariables.GetName(objDimension2)         ' 取【实际名】
+                    //     objVariables.Edit(sName, "Dimension1/2.0")          ' 用实际名改公式
+                    //   → 这里照样办:Edit 一律用 GetName 回读到的名字,而不是自己传进去的名字。
+                    //     这样即使 PutName 失败(拿到的是系统名)也照样能写值,两个动作解耦,
+                    //     不会"命名失败"连带把"写值"一起拖坏。
+                    var varsTyped = (SolidEdgeFramework.Variables)varsObj;
+
+                    try { varsTyped.PutName(dim, ds.Name); }
+                    catch (Exception ex) { warnings.Add("dims[" + ds.Name + "].PutName: " + ex.Message); }
+
+                    string varName = ds.Name;
+                    try { varName = varsTyped.GetName(dim); } catch { /* 读不到就退回传入名 */ }
+
+                    string formula = ds.Value ?? ds.Formula;
+                    if (!string.IsNullOrEmpty(formula))
+                        varsTyped.Edit(varName, formula);
                 }
                 catch (Exception ex) { warnings.Add("dims[" + ds.Name + "]: " + ex.Message); }
             }
@@ -1227,6 +1893,20 @@ namespace SolidEdge.Spy.McpServer.Tools
         private static string Error(string message)
         {
             return JsonSerializer.Serialize(new { status = "error", message = message });
+        }
+
+        /// <summary>反射读文档 Name;读不动(半加载/异常)返回 null,守卫按"不符"处理,宁可拒绝不误建。</summary>
+        private static string TryGetDocName(object doc)
+        {
+            try
+            {
+                return doc?.GetType().InvokeMember("Name",
+                    System.Reflection.BindingFlags.GetProperty, null, doc, null) as string;
+            }
+            catch
+            {
+                return null;
+            }
         }
     }
 }

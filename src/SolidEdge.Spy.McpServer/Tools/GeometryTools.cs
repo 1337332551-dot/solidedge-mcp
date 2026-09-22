@@ -33,6 +33,8 @@ public static class GeometryTools
 
 		public string OrientationLabel;
 
+		public bool? OrientationApplied;
+
 		public bool? CameraRestored;
 
 		public string RestoreMethod;
@@ -58,6 +60,7 @@ public static class GeometryTools
 				width = Width,
 				height = Height,
 				orientation = OrientationLabel,
+				orientationApplied = OrientationApplied,
 				cameraRestored = CameraRestored,
 				restoreMethod = RestoreMethod,
 				note = Note
@@ -132,11 +135,16 @@ public static class GeometryTools
 		object obj2 = Get(obj, "RefPlanes");
 		int num = Count(obj2);
 		List<object> list = new List<object>();
+		List<string> cleanupErrors = new List<string>();
 		for (int i = 1; i <= num; i++)
 		{
 			object obj3 = Get(obj2, "Item", i);
 			string name = SafeString(Get(obj3, "DisplayName")) ?? "(无名称)";
-			(string, bool, double[], double[]) tuple = ProbePlaneNormal(context, obj3);
+			var tuple = ProbePlaneNormal(context, obj3);
+			if (tuple.Item5 != null)
+			{
+				cleanupErrors.Add("#" + i + " " + name + ": " + tuple.Item5);
+			}
 			list.Add(new
 			{
 				index = i,
@@ -153,7 +161,8 @@ public static class GeometryTools
 			status = "ok",
 			target = "refplanes",
 			count = num,
-			refPlanes = list
+			refPlanes = list,
+			cleanupError = ((cleanupErrors.Count > 0) ? string.Join("; ", cleanupErrors) : null)
 		});
 	}
 
@@ -214,19 +223,21 @@ public static class GeometryTools
 		});
 	}
 
-	private static (string normalAxis, bool axisAligned, double[] origin2d, double[] projectedLength) ProbePlaneNormal(SolidEdgeContext context, object plane)
+	private static (string normalAxis, bool axisAligned, double[] origin2d, double[] projectedLength, string cleanupError) ProbePlaneNormal(SolidEdgeContext context, object plane)
 	{
+		object tempProfileSet = null;
+		object profile = null;
 		try
 		{
-			object obj = CreateTempProfile(context, plane);
-			if (obj == null)
+			profile = CreateTempProfile(context, plane, out tempProfileSet);
+			if (profile == null)
 			{
-				return (normalAxis: null, axisAligned: false, origin2d: null, projectedLength: null);
+				return (normalAxis: null, axisAligned: false, origin2d: null, projectedLength: null, cleanupError: null);
 			}
-			double[] array = Convert3D(obj, 0.0, 0.0, 0.0);
-			double[] a = Convert3D(obj, 1.0, 0.0, 0.0);
-			double[] a2 = Convert3D(obj, 0.0, 1.0, 0.0);
-			double[] a3 = Convert3D(obj, 0.0, 0.0, 1.0);
+			double[] array = Convert3D(profile, 0.0, 0.0, 0.0);
+			double[] a = Convert3D(profile, 1.0, 0.0, 0.0);
+			double[] a2 = Convert3D(profile, 0.0, 1.0, 0.0);
+			double[] a3 = Convert3D(profile, 0.0, 0.0, 1.0);
 			double num = Dist2D(a, array);
 			double num2 = Dist2D(a2, array);
 			double num3 = Dist2D(a3, array);
@@ -234,23 +245,52 @@ public static class GeometryTools
 			double num4 = Math.Min(num, Math.Min(num2, num3));
 			string item2 = ((num4 == num) ? "X" : ((num4 == num2) ? "Y" : "Z"));
 			bool item3 = num4 < 1E-06;
-			TryCloseProfile(obj);
-			return (normalAxis: item2, axisAligned: item3, origin2d: array, projectedLength: item);
+			TryCloseProfile(profile);
+			return (normalAxis: item2, axisAligned: item3, origin2d: array, projectedLength: item, cleanupError: TryDeleteTempProfileSet(tempProfileSet));
 		}
 		catch
 		{
-			return (normalAxis: null, axisAligned: false, origin2d: null, projectedLength: null);
+			TryCloseProfile(profile);
+			return (normalAxis: null, axisAligned: false, origin2d: null, projectedLength: null, cleanupError: TryDeleteTempProfileSet(tempProfileSet));
 		}
 	}
 
-	private static object CreateTempProfile(SolidEdgeContext context, object plane)
+	private static object CreateTempProfile(SolidEdgeContext context, object plane, out object tempProfileSet)
 	{
+		tempProfileSet = null;
 		object obj = Get(context.GetApplication(), "ActiveDocument");
 		if (obj == null)
 		{
 			return null;
 		}
-		return Call(Get(Call(Get(obj, "ProfileSets"), "Add", null), "Profiles"), "Add", new object[1] { plane });
+		object obj2 = Call(Get(obj, "ProfileSets"), "Add", null);
+		tempProfileSet = obj2;
+		return Call(Get(obj2, "Profiles"), "Add", new object[1] { plane });
+	}
+
+	/// <summary>
+	/// 2026-09-16 体检 P0-2 整改:只读工具不得写模型。探查用临时 ProfileSet 用后必删
+	/// (官方成员 ProfileSet.Delete()),删除失败时返回人话说明由 ReadAllRefPlanes
+	/// 聚合回传,不许静默残留。本删除只针对本工具自己创建的临时对象,不碰用户数据。
+	/// </summary>
+	private static string TryDeleteTempProfileSet(object tempProfileSet)
+	{
+		if (tempProfileSet == null)
+		{
+			return null;
+		}
+		try
+		{
+			if (ManualInvoke.TryInvoke(tempProfileSet, "Delete", Array.Empty<object>(), out var _, out var error))
+			{
+				return null;
+			}
+			return "临时 ProfileSet 删除失败:" + (error?.Message ?? "未知错误") + "(文档已置脏,残留需手动清理)";
+		}
+		catch (Exception ex)
+		{
+			return "临时 ProfileSet 删除异常:" + ex.Message + "(残留需手动清理)";
+		}
 	}
 
 	private static void TryCloseProfile(object profile)
@@ -305,7 +345,8 @@ public static class GeometryTools
 	{
 		try
 		{
-			return context.Invoke(() => CaptureCore(context, orientation, fit, zoom, width, height, restoreCamera, explicitPath).ToJson());
+			// CLI 只要 JSON,不需要图片文件,保持原有去重行为
+			return context.Invoke(() => CaptureCore(context, orientation, fit, zoom, width, height, restoreCamera, explicitPath, keepFile: false).ToJson());
 		}
 		catch (Exception ex)
 		{
@@ -321,7 +362,8 @@ public static class GeometryTools
 		//IL_009e: Expected O, but got Unknown
 		//IL_0051: Unknown result type (might be due to invalid IL or missing references)
 		//IL_005b: Expected O, but got Unknown
-		CaptureMeta captureMeta = CaptureCore(context, orientation, fit, zoom, width, height, restoreCamera, explicitPath);
+		// MCP 工具路线:一定要内嵌图片;若给了 region 还要裁剪 —— 所以文件必须真实存在,不能被去重删掉
+		CaptureMeta captureMeta = CaptureCore(context, orientation, fit, zoom, width, height, restoreCamera, explicitPath, keepFile: true);
 		// region 裁剪:先整幅截、再裁 —— 3D 与 DFT 两条路线都适用,不动相机/窗口矩形逻辑
 		if (captureMeta.Ok && !string.IsNullOrWhiteSpace(region) && captureMeta.ImagePath != null)
 		{
@@ -393,7 +435,10 @@ public static class GeometryTools
 		throw new ArgumentException("未知视角 \"" + orientation + "\"。可用: current/iso/top/front/back/left/right/bottom");
 	}
 
-	private static CaptureMeta CaptureCore(SolidEdgeContext context, string orientation, bool fit, double? zoom, int width, int height, bool restoreCamera, string explicitPath)
+	// keepFile: 调用方是否还需要这个图片文件(内嵌给 AI / 按 region 裁剪)。
+	// true 时即使画面与上一张相同也保留文件,不删除 —— 否则返回的 ImagePath 指向已删文件,
+	// 下游 region 裁剪、内嵌图片、read_file 会连锁失败(2026-09-16 修复)。
+	private static CaptureMeta CaptureCore(SolidEdgeContext context, string orientation, bool fit, double? zoom, int width, int height, bool restoreCamera, string explicitPath, bool keepFile)
 	{
 		//IL_013a: Unknown result type (might be due to invalid IL or missing references)
 		//IL_0370: Unknown result type (might be due to invalid IL or missing references)
@@ -421,7 +466,7 @@ public static class GeometryTools
 		{
 			if (ManualInvoke.TryInvoke(result, "ActiveSheet", null, out var _, out var _))
 			{
-				return CaptureSheetWindow(application, result, orientation, fit, zoom, width, height, explicitPath);
+				return CaptureSheetWindow(application, result, orientation, fit, zoom, width, height, explicitPath, keepFile);
 			}
 			return FailMeta("取 View 失败: " + error2?.Message);
 		}
@@ -507,6 +552,7 @@ public static class GeometryTools
 		bool flag5 = TryCaptureWindow(text2, out var width2, out var height2, out var error4);
 		bool? flag6 = null;
 		string restoreMethod = null;
+		string backupNote = null;
 		if (restoreCamera & flag)
 		{
 			if (flag2)
@@ -549,6 +595,23 @@ public static class GeometryTools
 			{
 				flag6 = false;
 			}
+			// 2026-09-16 体检 P1-6 整改:相机还原成功后立即删除备份命名视图,不再残留污染文档;
+			// 还原失败时保留备份供手动恢复,并在 note 里诚实说明(SDK 通道:NamedViews.Remove(Name))。
+			if (flag2)
+			{
+				if (flag6 == true && TryRemoveBackupNamedView(application))
+				{
+					backupNote = null;
+				}
+				else if (flag6 == true)
+				{
+					backupNote = "备份命名视图 " + CameraBackupViewName + " 删除失败,已残留(可手动删除)";
+				}
+				else
+				{
+					backupNote = "相机还原失败,备份命名视图 " + CameraBackupViewName + " 已保留供手动恢复";
+				}
+			}
 		}
 		if (!flag5)
 		{
@@ -559,13 +622,18 @@ public static class GeometryTools
 		{
 			list.Add("视角切换失败(IDispatch put 不通),截的是切换前视图");
 		}
+		if (backupNote != null)
+		{
+			list.Add(backupNote);
+		}
 		if (flag6 == false)
 		{
 			list.Add("相机还原失败,named-view 与 camera-ex 均不可用");
 		}
 		if (explicitPath == null)
 		{
-			if (CaptureStore.IsDuplicate(text2))
+			bool isDup = CaptureStore.IsDuplicate(text2);
+			if (isDup && !keepFile)
 			{
 				try
 				{
@@ -576,6 +644,10 @@ public static class GeometryTools
 				}
 				list.Add("与上一张画面相同,未重复落盘");
 			}
+			else if (isDup)
+			{
+				list.Add("与上一张画面相同,保留文件(内嵌/裁剪需要)");
+			}
 			CaptureStore.EnforceRetention();
 		}
 		return new CaptureMeta
@@ -585,10 +657,36 @@ public static class GeometryTools
 			Width = width2,
 			Height = height2,
 			OrientationLabel = orientation,
+			OrientationApplied = ((orientValue == 0) ? null : ((bool?)flag4)),
 			CameraRestored = flag6,
 			RestoreMethod = restoreMethod,
 			Note = ((list.Count > 0) ? string.Join("; ", list) : null)
 		};
+	}
+
+	/// <summary>
+	/// 2026-09-16 体检 P1-6 整改:删除相机备份命名视图(官方成员 NamedViews.Remove(Name),
+	/// 见 SE2022 SDK SolidEdgeFramework~NamedViews~Remove.html)。只删本工具自己创建的
+	/// __se_mcp_bak,不碰用户命名视图;失败返回 false 由 note 诚实回传。
+	/// </summary>
+	private static bool TryRemoveBackupNamedView(object application)
+	{
+		try
+		{
+			if (!ManualInvoke.TryInvoke(application, "ActiveDocument", null, out var doc, out var _) || doc == null)
+			{
+				return false;
+			}
+			if (!ManualInvoke.TryInvoke(doc, "NamedViews", null, out var views, out var _) || views == null)
+			{
+				return false;
+			}
+			return ManualInvoke.TryInvoke(views, "Remove", new object[1] { CameraBackupViewName }, out var _, out var _);
+		}
+		catch
+		{
+			return false;
+		}
 	}
 
 	private static string GetDocNameForFile(object app)
@@ -611,7 +709,7 @@ public static class GeometryTools
 		}
 	}
 
-	private static CaptureMeta CaptureSheetWindow(object application, object sheetWindow, string orientation, bool fit, double? zoom, int width, int height, string explicitPath)
+	private static CaptureMeta CaptureSheetWindow(object application, object sheetWindow, string orientation, bool fit, double? zoom, int width, int height, string explicitPath, bool keepFile)
 	{
 		List<string> list = new List<string>();
 		if (!string.IsNullOrWhiteSpace(orientation) && !string.Equals(orientation.Trim(), "current", StringComparison.OrdinalIgnoreCase))
@@ -685,7 +783,8 @@ public static class GeometryTools
 		}
 		if (explicitPath == null)
 		{
-			if (CaptureStore.IsDuplicate(text2))
+			bool isDup = CaptureStore.IsDuplicate(text2);
+			if (isDup && !keepFile)
 			{
 				try
 				{
@@ -695,6 +794,10 @@ public static class GeometryTools
 				{
 				}
 				list.Add("与上一张画面相同,未重复落盘");
+			}
+			else if (isDup)
+			{
+				list.Add("与上一张画面相同,保留文件(内嵌/裁剪需要)");
 			}
 			CaptureStore.EnforceRetention();
 		}
@@ -920,20 +1023,63 @@ public static class GeometryTools
 		}
 	}
 
+	/// <summary>
+	/// 读包围盒 [xmin,ymin,zmin,xmax,ymax,zmax](米)。
+	///
+	/// 2026-09-14 修正:原实现读 `RangeBox` 属性 —— 零件侧全 SDK 查无此成员
+	/// (`Model_members.html` / `ExtrudedProtrusion_members.html` 均 0 命中;
+	///  `RangeBox` 只在钣金 `ShowRangeBox` 与装配 `Occurrence.GetRangeBox()` 里出现),
+	/// 所以它**恒返 null** —— 这正是 `se_read_geometry target=model` 长期
+	/// `rangeBox=null` 的原因(refplanes 那条路走的是草图点换算,不受影响)。
+	/// 改用官方 `Body.GetRange`(SolidEdgeGeometry.Body,两个 ByRef Double() out 参数):
+	///   var body = (SolidEdgeGeometry.Body)host.Body; body.GetRange(ref min, ref max);
+	/// 入参可能是 Model / 特征 / 其它拓扑对象 → 先试自身(自身有 Body),再试 Parent。
+	/// </summary>
 	private static double[] TryRangeBox(object obj)
 	{
+		double[] num = TryBodyRange(obj);
+		if (num != null)
+		{
+			return num;
+		}
 		try
 		{
-			if (Get(obj, "RangeBox") is Array { Length: >=6 } array)
+			return TryBodyRange(Get(obj, "Parent"));
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	/// <summary>宿主对象的实体包围盒,走官方 Body.GetRange;读不到返回 null。</summary>
+	private static double[] TryBodyRange(object host)
+	{
+		if (host == null)
+		{
+			return null;
+		}
+		try
+		{
+			object obj = Get(host, "Body");
+			if (obj == null)
+			{
+				return null;
+			}
+			SolidEdgeGeometry.Body body = (SolidEdgeGeometry.Body)obj;
+			Array min = Array.CreateInstance(typeof(double), 0);
+			Array max = Array.CreateInstance(typeof(double), 0);
+			body.GetRange(ref min, ref max);
+			if (min != null && max != null && min.Length >= 3 && max.Length >= 3)
 			{
 				return new double[6]
 				{
-					Convert.ToDouble(array.GetValue(0)),
-					Convert.ToDouble(array.GetValue(1)),
-					Convert.ToDouble(array.GetValue(2)),
-					Convert.ToDouble(array.GetValue(3)),
-					Convert.ToDouble(array.GetValue(4)),
-					Convert.ToDouble(array.GetValue(5))
+					Convert.ToDouble(min.GetValue(0)),
+					Convert.ToDouble(min.GetValue(1)),
+					Convert.ToDouble(min.GetValue(2)),
+					Convert.ToDouble(max.GetValue(0)),
+					Convert.ToDouble(max.GetValue(1)),
+					Convert.ToDouble(max.GetValue(2))
 				};
 			}
 		}

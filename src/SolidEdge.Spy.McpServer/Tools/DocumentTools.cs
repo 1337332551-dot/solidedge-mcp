@@ -37,7 +37,7 @@ public static class DocumentTools
 		new ConcurrentDictionary<string, TrackedDocument>(StringComparer.OrdinalIgnoreCase);
 
 	[McpServerTool]
-	[Description("获取 Solid Edge 当前活动文档的基本信息:文档类型(COM 真实类型名,如 SolidEdgeDraft.DraftDocument / SolidEdgePart.PartDocument)、文件名、所在环境。AI 应在调用其它工具前先调此工具了解上下文。")]
+	[Description("获取当前活动文档的基本信息:文档类型(COM 真实类型名,如 SolidEdgePart.PartDocument)、文件名、全路径、所在环境,以及内容探针(modelsCount=零件模型数,occurrencesCount=装配件数,sheetsCount=图纸页数,不适用为 null)。AI 应在调用其它工具前先调此工具了解上下文;建模前确认文档身份和是否空模板也先用它,不用再跑一次性脚本。")]
 	public static string se_get_document(SolidEdgeContext context)
 	{
 		try
@@ -71,7 +71,12 @@ public static class DocumentTools
 						typeShort = typeShortName,
 						name = SafeGetProperty(activeDocument, "Name"),
 						fullName = SafeGetProperty(activeDocument, "FullName"),
-						environment = SafeGetActiveEnvironmentName(application)
+						environment = SafeGetActiveEnvironmentName(application),
+						// 轻量内容探针:零件/钣金=Models,装配=Occurrences,图纸=Sheets。
+						// 建模前确认"是空模板"不用再跑一次性脚本(se_open_document 同款探针思路)。
+						modelsCount = SafeProbeCount(activeDocument, "Models"),
+						occurrencesCount = SafeProbeCount(activeDocument, "Occurrences"),
+						sheetsCount = SafeProbeCount(activeDocument, "Sheets")
 					}
 				});
 			});

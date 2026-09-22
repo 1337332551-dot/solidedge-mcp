@@ -34,6 +34,8 @@ namespace SolidEdge.Spy.EventMcp
             public string[] AppProps;
             public string[] DocProps;
             public bool DocumentLevel;
+            /// <summary>true=完全不订阅(状态里显示禁用原因)。用于会干扰 SE 自身对话框的接口。</summary>
+            public bool Skip;
         }
 
         private sealed class Subscription
@@ -65,6 +67,11 @@ namespace SolidEdge.Spy.EventMcp
                 AppProps = new string[0], DocProps = new string[] { "Models.Item(1).ModelRecomputeEvents" }, DocumentLevel = true },
             new Target { Id = new Guid("f865f7bd-8d49-11d3-a3e6-0004ac969a5d"), Name = "ISEAssemblyRecomputeEvents",
                 AppProps = new string[0], DocProps = new string[] { "AssemblyRecomputeEvents", "Models.Item(1).AssemblyRecomputeEvents" }, DocumentLevel = true },
+            // ISEFileUIEvents 2026-09-22 起彻底不订(Skip):只要 Advise了这个连接点,SE 就把
+            // "另存为/打开/新建"当被接管处理,回调返回 E_NOTIMPL 也放行不了(实机验证),
+            // 表现为命令 2ms 内结束、对话框不弹。不订阅 = SE 视作没人监听 = 必然弹框。
+            new Target { Id = new Guid("ecc667a1-a4aa-11d1-aecc-08003616ce02"), Name = "ISEFileUIEvents",
+                AppProps = new string[] { "FileUIEvents" }, DocProps = new string[0], DocumentLevel = false, Skip = true },
             new Target { Id = new Guid("90223887-09cd-11d1-ba07-080036230602"), Name = "ISEApplicationEvents",
                 AppProps = new string[0], DocProps = new string[0], DocumentLevel = false },
         };
@@ -210,6 +217,12 @@ namespace SolidEdge.Spy.EventMcp
 
         private void TrySubscribe(Application app, object doc, List<Guid> appCps, List<Guid> docCps, Target t)
         {
+            if (t.Skip)
+            {
+                _failureReasons[t.Name] = "已禁用:订阅会拦截另存为/打开/新建对话框(2026-09-22 实测返回 E_NOTIMPL 也放行不了)";
+                return;
+            }
+
             // 途径1:Application 直接连接点
             if (appCps != null && appCps.Contains(t.Id))
             {
@@ -394,7 +407,8 @@ namespace SolidEdge.Spy.EventMcp
                 case "ISEAssemblyRecomputeEvents":
                     return ConnectionPointHelper.AdviseSink<ISEAssemblyRecomputeEvents>(source, (ISEAssemblyRecomputeEvents)sink);
                 case "ISEFileUIEvents":
-                    return ConnectionPointHelper.AdviseSink<ISEFileUIEvents>(source, (ISEFileUIEvents)sink);
+                    // 用自定义的非侵入声明(同 IID、同虚表顺序),以便把 E_NOTIMPL 真正还给 SE。
+                    return ConnectionPointHelper.AdviseSink<IFileUIEventsNonIntrusive>(source, (IFileUIEventsNonIntrusive)sink);
                 case "ISEApplicationEvents":
                     return ConnectionPointHelper.AdviseSink<ISEApplicationEvents>(source, (ISEApplicationEvents)sink);
                 default:

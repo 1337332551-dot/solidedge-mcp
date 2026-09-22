@@ -45,9 +45,10 @@ namespace SolidEdge.Spy.McpServer.Tests
         }
 
         [Fact]
-        public void 登记表恰好21个工具()
+        public void 登记表恰好23个工具()
         {
-            Assert.Equal(21, ToolRisk.RegisteredTools.Count());
+            // 21(合流前) + se_assembly_build + se_assembly_query(远端装配域,2026-09-22)
+            Assert.Equal(23, ToolRisk.RegisteredTools.Count());
         }
 
         [Theory]

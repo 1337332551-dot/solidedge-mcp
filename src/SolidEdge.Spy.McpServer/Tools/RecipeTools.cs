@@ -458,10 +458,16 @@ public static class RecipeTools
 			}, JsonOpts());
 		}
 
-		if (worst != InvocationRisk.Normal)
-		{
-			AuditLog.Write("se_recipe_run", startId, "(recipe:" + (spec.Name ?? "?") + ")", false, steps.Length + " steps, worst=" + worstMember, worst, confirm, null);
-		}
+		// 2026-09-14 台账改造：原先只在 worst != Normal 时写审计 → 纯 Normal 配方（全读类）在
+		// 通道 A 里完全不可见，台账只能靠 B 手记（方案 §5.6 的"纯 Normal 全空"缺口）。
+		// 现在总是写，并把 verification 声明写进 note。
+		// ⚠️ note 只说明"判据是否声明"，**不代表判据结果**——配方不声明快照 target，
+		// 判据无法在此自动执行，仍需按 recipes/README §五 的 save→run→diff 流程验收。
+		string verifyNote = string.IsNullOrWhiteSpace(spec.VerifyName)
+			? "verification=none"
+			: "verification=declared:" + spec.VerifyKind + "/" + spec.VerifyName + "/" + spec.VerifyExpect;
+		AuditLog.Write("se_recipe_run", startId, "(recipe:" + (spec.Name ?? "?") + ")", false,
+			steps.Length + " steps, worst=" + worstMember, worst, confirm, verifyNote);
 		return null;
 	}
 

@@ -163,7 +163,7 @@ namespace SolidEdge.Spy.McpServer.Tools
             new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
         /// <summary>规则集版本。规则增删/改级时 +1。</summary>
-        public const string Version = "1.0";
+        public const string Version = "1.1";   // 1.1:补 W406/W407 + E103 覆盖 dims/autoConstraint/fixOrigin
 
         /// <summary>零件文档默认参考面个数。中文版 DisplayName 是「参考平面_N」,只能按索引取。</summary>
         public const int DefaultRefPlaneCount = 3;

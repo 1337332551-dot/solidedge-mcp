@@ -353,7 +353,7 @@ public static class SnapshotTools
 			foreach (ComPropertyInfo p in ps)
 			{
 				string n = p.Name;
-				if (n == "MailSession") continue;
+				if (BlockedMembers.IsBlocked(n)) continue;
 				if (props.Count >= maxProps) break;
 				try
 				{

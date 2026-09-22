@@ -44,13 +44,21 @@ namespace SolidEdge.Spy.McpServer.Tools
                 new ConsecutiveCutRule(),     // W401 同平面多孔未合并(僵尸头号杀手)
                 new CutOutsideStockRule(),    // W403 除料落在毛坯外
                 new LoopOverlapRule(),        // W404 环重叠
+                new ConstraintBindingRule(),  // W406 声明与形状不匹配 / W407 dims element 越界
+
+                // ---- 扩 op(2026-09-22):fillet / chamfer / rib / pattern ----
+                new EdgeRefRule(),            // E205 边引用缺失/结构错/项解析失败
+                new FilletRule(),             // E405 fillet 缺 radius / <=0
+                new ChamferRule(),            // E406 chamfer 缺 distance / <=0
+                new RibRule(),                // E407 rib 缺 thickness / 轮廓不是开放链形状
+                new PatternRule(),            // E408 pattern 缺 of/counts/spacing 非法 / W408 of 本批内找不到
             };
         }
     }
 
     // ==================== 结构层 ====================
 
-    /// <summary>E101:op 必须是 plane / extrude / cut / revolve。</summary>
+    /// <summary>E101:op 必须是 plane / extrude / cut / revolve / fillet / chamfer / rib / pattern。</summary>
     public sealed class OpRule : IFeatureRule
     {
         public string Code { get { return "E101"; } }
@@ -60,12 +68,13 @@ namespace SolidEdge.Spy.McpServer.Tools
         public IEnumerable<Issue> Check(ValidationContext ctx)
         {
             var s = ctx.Current;
-            if (s.OpLower == "plane" || s.OpLower == "extrude" || s.OpLower == "cut" || s.OpLower == "revolve")
+            if (s.OpLower == "plane" || s.OpLower == "extrude" || s.OpLower == "cut" || s.OpLower == "revolve" ||
+                s.OpLower == "fillet" || s.OpLower == "chamfer" || s.OpLower == "rib" || s.OpLower == "pattern")
                 yield break;
 
             yield return ctx.Error("E101", "op",
-                "未知 op \"" + s.Op + "\",仅支持 plane / extrude / cut / revolve。",
-                new { action = "set", field = "op", allowed = new[] { "plane", "extrude", "cut", "revolve" } });
+                "未知 op \"" + s.Op + "\",仅支持 plane / extrude / cut / revolve / fillet / chamfer / rib / pattern。",
+                new { action = "set", field = "op", allowed = new[] { "plane", "extrude", "cut", "revolve", "fillet", "chamfer", "rib", "pattern" } });
         }
     }
 
@@ -190,9 +199,9 @@ namespace SolidEdge.Spy.McpServer.Tools
         public Severity DefaultLevel { get { return Severity.Error; } }
         public string[] AppliesTo { get { return new[] { "*" }; } }
 
-        private static readonly string[] StringFields = { "op", "name", "plane", "base", "mode", "endmode" };
-        private static readonly string[] NumberFields = { "depth", "distance", "angle", "degrees" };
-        private static readonly string[] IntFields = { "side", "profileside" };
+        private static readonly string[] StringFields = { "op", "name", "plane", "base", "mode", "endmode", "of" };
+        private static readonly string[] NumberFields = { "depth", "distance", "angle", "degrees", "radius", "thickness", "xspacing", "yspacing" };
+        private static readonly string[] IntFields = { "side", "profileside", "xcount", "ycount" };
 
         public IEnumerable<Issue> Check(ValidationContext ctx)
         {
@@ -224,6 +233,15 @@ namespace SolidEdge.Spy.McpServer.Tools
             if (BadBool(s, "visible"))
                 yield return ctx.Error("E103", "visible", "字段 \"visible\" 必须是布尔值。",
                     new { action = "set_type", field = "visible", type = "bool" });
+
+            // 约束/标注声明(2026-09-13 新增字段):类型读不出来同样会被静默按默认值处理
+            foreach (var f in new[] { "autoconstraint", "fixorigin" })
+                if (BadBool(s, f))
+                    yield return ctx.Error("E103", f, "字段 \"" + f + "\" 必须是布尔值。",
+                        new { action = "set_type", field = f, type = "bool" });
+
+            foreach (var iss in CheckDims(ctx, s))
+                yield return iss;
 
             if (BadShapeKind(s, "circle", true))
                 yield return ctx.Error("E103", "circle",
@@ -277,6 +295,64 @@ namespace SolidEdge.Spy.McpServer.Tools
             if (el.ValueKind == JsonValueKind.True || el.ValueKind == JsonValueKind.False) return false;
             if (el.ValueKind == JsonValueKind.String) return !bool.TryParse(el.GetString(), out _);
             return el.ValueKind != JsonValueKind.Null;
+        }
+
+        /// <summary>
+        /// dims 的结构类型(dims 必是数组 / 每项必是对象 / element 必是整数 / name·value·formula 必是字符串)。
+        /// 类型读不出来就是"静默不生效"——正是 E103 要拦的那一类。
+        /// 注意 element 若写成 1.5 这类小数,解析器的 GetInt32 会直接抛异常,所以这里必须提前拦。
+        /// </summary>
+        private static IEnumerable<Issue> CheckDims(ValidationContext ctx, FeatureSpec s)
+        {
+            JsonElement dimsEl;
+            if (!TryRaw(s, "dims", out dimsEl) || dimsEl.ValueKind == JsonValueKind.Null) yield break;
+
+            if (dimsEl.ValueKind != JsonValueKind.Array)
+            {
+                yield return ctx.Error("E103", "dims",
+                    "字段 \"dims\" 必须是数组(每项 {\"element\":n,\"name\":\"...\",\"value\"|\"formula\":\"...\"})。",
+                    new { action = "set_type", field = "dims", type = "array" });
+                yield break;
+            }
+
+            int k = 0;
+            foreach (var item in dimsEl.EnumerateArray())
+            {
+                string fld = "dims[" + k + "]";
+                if (item.ValueKind != JsonValueKind.Object)
+                {
+                    yield return ctx.Error("E103", fld,
+                        "dims 第 " + (k + 1) + " 项必须是对象。",
+                        new { action = "set_type", field = fld, type = "object" });
+                }
+                else
+                {
+                    JsonElement el;
+                    if (item.TryGetProperty("element", out el) && el.ValueKind != JsonValueKind.Null)
+                    {
+                        bool ok = el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out _);
+                        if (!ok)
+                            yield return ctx.Error("E103", fld + ".element",
+                                "dims 第 " + (k + 1) + " 项的 element 必须是整数(0-based 线索引)。",
+                                new { action = "set_type", field = fld + ".element", type = "int" });
+                    }
+
+                    foreach (var f in new[] { "name", "value", "formula" })
+                        if (BadStrEl(item, f))
+                            yield return ctx.Error("E103", fld + "." + f,
+                                "dims 第 " + (k + 1) + " 项的 \"" + f + "\" 必须是字符串。",
+                                new { action = "set_type", field = fld + "." + f, type = "string" });
+                }
+                k++;
+            }
+        }
+
+        private static bool BadStrEl(JsonElement obj, string f)
+        {
+            if (obj.ValueKind != JsonValueKind.Object) return false;
+            JsonElement el;
+            if (!obj.TryGetProperty(f, out el)) return false;
+            return el.ValueKind != JsonValueKind.String && el.ValueKind != JsonValueKind.Null;
         }
 
         private static bool BadShapeKind(FeatureSpec s, string f, bool allowObject)
@@ -421,7 +497,8 @@ namespace SolidEdge.Spy.McpServer.Tools
             string ref_ = isPlaneOp ? s.BaseRef : s.PlaneRef;
             string field = isPlaneOp ? "base" : "plane";
 
-            if (!isPlaneOp && s.OpLower != "extrude" && s.OpLower != "cut") yield break;
+            if (!isPlaneOp && s.OpLower != "extrude" && s.OpLower != "cut" &&
+                s.OpLower != "rib" && s.OpLower != "pattern") yield break;
 
             if (string.IsNullOrWhiteSpace(ref_))
             {
@@ -861,6 +938,271 @@ namespace SolidEdge.Spy.McpServer.Tools
                     }
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// W406 声明了约束/标注但形状走不到应用路径 · W407 dims 的 element 索引越界 / 声明不完整。
+    ///
+    /// 背景(2026-09-13 构建器实测):autoConstraint / fixOrigin / dims 只在
+    /// CreateProfileMulti / CreateProfileRevolve 的【直线环】路径上应用(必须在 Profile.End 之前),
+    /// circle / circles / slot 轮廓直接 End —— 声明被【静默忽略】,连错都不报。
+    /// 几何照样建成,但"参数化意图"必然落空:变量不存在,后续特征引用它会失败。
+    ///
+    /// 级别定 warning 而不是 error:geometrically 能建成,不属于"必然失败"
+    /// (se_model_build 遇 error 会拒绝执行整批,不该为这个拦住建模)。
+    ///
+    /// element 越界的可算性:解析器已把 rect 归一化成 4 点环、polygon/loops 直接给点列,
+    /// 所以"跨环扁平线索引"的总数 = Σ 各环点数(旋转轴是独立构造线,不占位)。
+    /// </summary>
+    public sealed class ConstraintBindingRule : IFeatureRule
+    {
+        public string Code { get { return "W406"; } }
+        public Severity DefaultLevel { get { return Severity.Warning; } }
+        public string[] AppliesTo { get { return new[] { "*" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+
+            bool hasDims = s.Dims != null && s.Dims.Count > 0;
+            bool hasAuto = s.AutoConstraint == true;
+            bool hasFix = s.FixOrigin == true;
+            if (!hasDims && !hasAuto && !hasFix) yield break;
+
+            var names = new List<string>();
+            if (hasAuto) names.Add("autoConstraint");
+            if (hasFix) names.Add("fixOrigin");
+            if (hasDims) names.Add("dims(" + s.Dims.Count + " 条)");
+
+            // ---- W406:形状不支持(声明必然不生效) ----
+            string why = null;
+            if (s.OpLower == "plane")
+                why = "op=\"plane\" 不建草图形状";
+            else if (s.HasCircle)
+                why = "circle(圆)轮廓没有直线可约束/标注";
+            else if (s.HasCircles)
+                why = "circles(多真圆)轮廓没有直线可约束/标注";
+            else if (s.HasSlot)
+                why = "slot(腰孔)轮廓未接入约束/标注应用路径";
+
+            if (why != null)
+            {
+                yield return ctx.Warn("W406", hasDims ? "dims" : (hasAuto ? "autoconstraint" : "fixorigin"),
+                    "声明了 " + string.Join("、", names) + ",但 " + why +
+                    "——这些声明会被【静默忽略】:不报错,也不生效(尺寸不会被驱动、变量不会进变量表)。" +
+                    "如需尺寸驱动,请把轮廓改成 rect / polygon / loops 直线环。",
+                    new
+                    {
+                        action = "remove_or_switch_shape",
+                        fields = names,
+                        unsupportedShape = s.ShapeSource == "" ? s.OpLower : s.ShapeSource,
+                        supportedShapes = new[] { "rect", "polygon", "loops" }
+                    });
+                yield break;   // 形状不支持时再报 element 越界没有意义(重复报噪)
+            }
+
+            if (!hasDims) yield break;
+
+            // ---- W407:声明本身不成立 ----
+            int lineCount = 0;
+            foreach (var loop in s.Loops) lineCount += loop.Length;
+
+            for (int k = 0; k < s.Dims.Count; k++)
+            {
+                var ds = s.Dims[k];
+                string tag = string.IsNullOrEmpty(ds.Name) ? ("#" + k) : ds.Name;
+
+                if (ds.ParseError != null)
+                {
+                    yield return ctx.Warn("W407", "dims[" + k + "]",
+                        "第 " + (k + 1) + " 条标注声明不完整(" + ds.ParseError + "),该标注不会建立。",
+                        new { action = "fix", field = "dims[" + k + "]", required = new[] { "element", "name", "value|formula" } });
+                    continue;
+                }
+
+                if (ds.Element < 0 || ds.Element >= lineCount)
+                {
+                    yield return ctx.Warn("W407", "dims[" + k + "]",
+                        "dims \"" + tag + "\" 的 element=" + ds.Element + " 越界——本特征共 " + lineCount +
+                        " 条直线(跨环扁平 0-based,合法范围 0.." + Math.Max(lineCount - 1, 0) +
+                        "),运行时该标注会被跳过,变量 \"" + tag + "\" 不会建立。",
+                        new
+                        {
+                            action = "set",
+                            field = "dims[" + k + "].element",
+                            lineCount = lineCount,
+                            range = new[] { 0, Math.Max(lineCount - 1, 0) }
+                        });
+                }
+            }
+        }
+    }
+
+    // ==================== 扩 op 语义层(2026-09-22) ====================
+
+    /// <summary>
+    /// E205:fillet/chamfer 必须有 edges,且每项是可解析的 {"face":"face:ID","edge":0-based}。
+    /// 静态层只判结构;Face.ID 是否存在、edge 是否越界是运行期的事(几何校验留到运行时)。
+    /// </summary>
+    public sealed class EdgeRefRule : IFeatureRule
+    {
+        public string Code { get { return "E205"; } }
+        public Severity DefaultLevel { get { return Severity.Error; } }
+        public string[] AppliesTo { get { return new[] { "fillet", "chamfer" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+
+            if (s.Raw.ValueKind == JsonValueKind.Object && !s.Raw.TryGetProperty("edges", out _))
+            {
+                yield return ctx.Error("E205", "edges",
+                    s.OpLower + " 缺少 edges(边引用数组)。每项 {\"face\":\"face:<Face.ID>\",\"edge\":0-based}。",
+                    new { action = "provide", field = "edges",
+                          format = "[{\"face\":\"face:71\",\"edge\":0}]" });
+                yield break;
+            }
+
+            foreach (var er in s.Edges)
+            {
+                if (er.ParseError != null)
+                    yield return ctx.Error("E205", "edges",
+                        "边引用不合法:" + er.ParseError + "。",
+                        new { action = "fix", field = "edges", format = "{\"face\":\"face:<Face.ID>\",\"edge\":0}" });
+            }
+        }
+    }
+
+    /// <summary>E405:fillet 必须给 radius 且 &gt; 0。</summary>
+    public sealed class FilletRule : IFeatureRule
+    {
+        public string Code { get { return "E405"; } }
+        public Severity DefaultLevel { get { return Severity.Error; } }
+        public string[] AppliesTo { get { return new[] { "fillet" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+            if (!s.Radius.HasValue)
+                yield return ctx.Error("E405", "radius", "fillet 必须提供 radius(米)。",
+                    new { action = "provide", field = "radius", unit = "m" });
+            else if (s.Radius.Value <= 0)
+                yield return ctx.Error("E405", "radius", "radius 必须 > 0(当前 " + GeoUtil.Fmt(s.Radius.Value) + ")。",
+                    new { action = "set", field = "radius", must = "> 0", unit = "m" });
+        }
+    }
+
+    /// <summary>E406:chamfer 必须给 distance 且 &gt; 0。</summary>
+    public sealed class ChamferRule : IFeatureRule
+    {
+        public string Code { get { return "E406"; } }
+        public Severity DefaultLevel { get { return Severity.Error; } }
+        public string[] AppliesTo { get { return new[] { "chamfer" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+            if (!s.HasDistance)
+                yield return ctx.Error("E406", "distance", "chamfer 必须提供 distance(米)。",
+                    new { action = "provide", field = "distance", unit = "m" });
+            else if (s.Distance <= 0)
+                yield return ctx.Error("E406", "distance", "distance 必须 > 0(当前 " + GeoUtil.Fmt(s.Distance) + ")。",
+                    new { action = "set", field = "distance", must = "> 0", unit = "m" });
+        }
+    }
+
+    /// <summary>
+    /// E407:rib 必须给 thickness &gt; 0,且轮廓是【闭合】环。
+    /// SE 2022 实测:开放链经 Ribs.Add 不出几何,闭合轮廓(画在实体表面贴合面上)才出。
+    /// </summary>
+    public sealed class RibRule : IFeatureRule
+    {
+        public string Code { get { return "E407"; } }
+        public Severity DefaultLevel { get { return Severity.Error; } }
+        public string[] AppliesTo { get { return new[] { "rib" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+
+            if (!s.Thickness.HasValue)
+                yield return ctx.Error("E407", "thickness", "rib 必须提供 thickness(米)。",
+                    new { action = "provide", field = "thickness", unit = "m" });
+            else if (s.Thickness.Value <= 0)
+                yield return ctx.Error("E407", "thickness", "thickness 必须 > 0(当前 " + GeoUtil.Fmt(s.Thickness.Value) + ")。",
+                    new { action = "set", field = "thickness", must = "> 0", unit = "m" });
+
+            if (s.ShapeError != null)
+            {
+                yield return ctx.Error("E407", "polygon",
+                    "rib 需要【闭合】轮廓(rect/polygon/loops/circle)——SE 2022 的 Ribs.Add 通道不支持开放链画法。",
+                    new { action = "provide", field = "polygon",
+                          format = "[[u,v],...]",
+                          hint = "轮廓画在与实体表面贴合的平面上,如板底面用 RefPlane_1" });
+            }
+        }
+    }
+
+    /// <summary>
+    /// E408 / W408:pattern 的 of / counts / spacing。
+    /// E408 = 必然失败(缺 of、counts 非法、count&gt;1 却没给 spacing);
+    /// W408 = of 在本批之前找不到同名特征——可能引用的是更早调用或外部特征,不一定是错,只提醒。
+    /// </summary>
+    public sealed class PatternRule : IFeatureRule
+    {
+        public string Code { get { return "E408"; } }
+        public Severity DefaultLevel { get { return Severity.Error; } }
+        public string[] AppliesTo { get { return new[] { "pattern" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+
+            if (string.IsNullOrWhiteSpace(s.Of))
+            {
+                yield return ctx.Error("E408", "of",
+                    "pattern 必须提供 of(被阵列特征:本批前面特征的 name、SE 特征名或 obj-K 句柄)。",
+                    new { action = "provide", field = "of" });
+            }
+            else if (!s.Of.StartsWith("obj-", StringComparison.OrdinalIgnoreCase))
+            {
+                // 本批之前找同名 name:找不到只提醒(可能是上一次调用/外部已建的特征)
+                bool foundInBatch = false;
+                for (int i = 0; i < ctx.Index; i++)
+                {
+                    if (string.Equals(ctx.Specs[i].Name, s.Of, StringComparison.OrdinalIgnoreCase))
+                    {
+                        foundInBatch = true;
+                        break;
+                    }
+                }
+                if (!foundInBatch)
+                    yield return ctx.Warn("W408", "of",
+                        "of=\"" + s.Of + "\" 在本批之前的特征里没有同名 name。若它不是 SE 已有特征名(见前面返回的 feature 字段),运行时会报\"未找到被阵列特征\"。",
+                        new { action = "verify", field = "of" });
+            }
+
+            int xc = s.XCount ?? 1, yc = s.YCount ?? 1;
+            if (s.XCount.HasValue && s.XCount.Value < 1)
+                yield return ctx.Error("E408", "xcount", "xcount 必须 >= 1(当前 " + s.XCount.Value + ")。",
+                    new { action = "set", field = "xcount", min = 1 });
+            if (s.YCount.HasValue && s.YCount.Value < 1)
+                yield return ctx.Error("E408", "ycount", "ycount 必须 >= 1(当前 " + s.YCount.Value + ")。",
+                    new { action = "set", field = "ycount", min = 1 });
+            if (xc == 1 && yc == 1)
+                yield return ctx.Error("E408", "xcount",
+                    "xcount 与 ycount 不能同时为 1——至少一个方向要阵列,否则没有可阵列的东西。",
+                    new { action = "set", field = "xcount", hint = "如 xcount=3 + xspacing=0.02" });
+
+            if (xc > 1 && !s.XSpacing.HasValue)
+                yield return ctx.Error("E408", "xspacing",
+                    "xcount=" + xc + " 时必须提供 xspacing(米,> 0)。",
+                    new { action = "provide", field = "xspacing", unit = "m" });
+            if (yc > 1 && !s.YSpacing.HasValue)
+                yield return ctx.Error("E408", "yspacing",
+                    "ycount=" + yc + " 时必须提供 yspacing(米,> 0)。",
+                    new { action = "provide", field = "yspacing", unit = "m" });
         }
     }
 

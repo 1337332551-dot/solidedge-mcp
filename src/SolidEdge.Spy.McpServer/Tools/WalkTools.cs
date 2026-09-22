@@ -69,7 +69,7 @@ public static class WalkTools
 						if (comPropertyInfo.GetFunction != null && !comPropertyInfo.GetFunctionHasParameters)
 						{
 							string name2 = comPropertyInfo.Name;
-							if (!name2.Equals("MailSession"))
+							if (!BlockedMembers.IsBlocked(name2))
 							{
 								object obj3 = null;
 								try

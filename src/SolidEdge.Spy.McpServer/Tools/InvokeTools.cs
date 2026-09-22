@@ -245,9 +245,9 @@ public static class InvokeTools
 		{
 			return (statusJson: null, comResult: null, error: "成员名不能为空。请先用 se_describe_object 查看该对象的可用成员。");
 		}
-		if (ComSideEffectGuard.IsBlocked(member?.Trim()))
+		if (BlockedMembers.IsBlocked(member.Trim()))
 		{
-			return (statusJson: null, comResult: null, error: "拒绝调用 " + member.Trim() + ":该成员有全局副作用(如初始化 MAPI 邮件会话,弹出模态对话框堵死 COM 通道),已被共享黑名单禁止。");
+			return (statusJson: null, comResult: null, error: "拒绝调用 " + member.Trim() + ":它属于邮件/会签类副作用成员,读取或调用会激活 MAPI 子系统,可能弹出模态对话框并堵死 COM 通道(共享黑名单见 BlockedMembers)。");
 		}
 		if (targetObj == null)
 		{

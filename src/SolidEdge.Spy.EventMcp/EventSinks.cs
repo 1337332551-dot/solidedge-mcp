@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using SolidEdgeFramework;
 
 namespace SolidEdge.Spy.EventMcp
@@ -201,59 +202,115 @@ namespace SolidEdge.Spy.EventMcp
     }
 
     /// <summary>
-    /// 文件 UI 事件(宿主:Application 连接点 / FileUIEvents 属性)。
-    /// string 参数是 out:SE 在弹文件对话框前同步回调订阅方,期望"预填"对话框值。
-    /// 纯观察模式:out 一律置 null(不干预),ref 参数保持原值。
-    /// 注意:这是同步回调链路,僵尸订阅会毒化它导致对话框不弹(§5.8)——
-    /// 本 server 的干净退出机制就是为保护这条链路设计的。
+    /// 文件 UI 事件的"非侵入"接口声明(IID 与 interop 的 ISEFileUIEvents 完全一致)。
+    ///
+    /// 为什么不直接用 interop 的 ISEFileUIEvents:PIA 把这 6 个方法声明为 void,
+    /// 托管侧无法返回 HRESULT,CLR 自动回 S_OK。而 SE 对这几个"查询事件"的契约是
+    /// (官方 SolidEdgeFramework~ISEFileUIEvents~OnFileSaveAsUI.html 的 Remarks 原文):
+    ///   · E_NOTIMPL                      → SE 当没人监听,照常弹它自己的对话框
+    ///   · S_OK / S_FALSE 且字符串全 NULL → SE 取消命令并且不弹对话框
+    ///   · 其它错误码                     → SE 直接中止命令
+    /// 旧实现"out 置 null 即不干预"正好落在第二种:等于替用户点了取消,
+    /// 表现为"另存为/打开/新建点了没反应"(2026-09-20 实机确诊)。
+    ///
+    /// 2026-09-22 更正:上表"E_NOTIMPL→放行"对 SE 无效——修复部署确认后实机复测,另存为仍被拦。
+    /// SE 的实际行为是"只要 Advise 了就接管",与返回值无关。最终解 = 不订阅
+    /// (SubscriptionManager 中 ISEFileUIEvents 已标 Skip=true)。本 sink 仅留作历史/实验用途。
+    ///
+    /// 本接口取自 Interop.SolidEdge 108.0.0 反射结果:InterfaceIsIUnknown(虚表接口),
+    /// 成员顺序即虚表顺序,不可调整;字符串参数为 BSTR。
+    /// 仅把返回类型改为 [PreserveSig] int,以便把 E_NOTIMPL 真正还给 SE。
     /// </summary>
-    internal sealed class FileUIEventsSink : ISEFileUIEvents
+    [ComImport]
+    [Guid("ecc667a1-a4aa-11d1-aecc-08003616ce02")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IFileUIEventsNonIntrusive
     {
+        [PreserveSig] int OnFileOpenUI(
+            [MarshalAs(UnmanagedType.BStr)] out string Filename,
+            [MarshalAs(UnmanagedType.BStr)] out string AppendToTitle);
+
+        [PreserveSig] int OnFileSaveAsUI(
+            [MarshalAs(UnmanagedType.BStr)] out string Filename,
+            [MarshalAs(UnmanagedType.BStr)] out string AppendToTitle);
+
+        [PreserveSig] int OnFileNewUI(
+            [MarshalAs(UnmanagedType.BStr)] out string Filename,
+            [MarshalAs(UnmanagedType.BStr)] out string AppendToTitle);
+
+        [PreserveSig] int OnFileSaveAsImageUI(
+            [MarshalAs(UnmanagedType.BStr)] out string Filename,
+            [MarshalAs(UnmanagedType.BStr)] out string AppendToTitle,
+            ref int Width, ref int Height, ref SeImageQualityType ImageQuality);
+
+        [PreserveSig] int OnPlacePartUI(
+            [MarshalAs(UnmanagedType.BStr)] out string Filename,
+            [MarshalAs(UnmanagedType.BStr)] out string AppendToTitle);
+
+        [PreserveSig] int OnCreateInPlacePartUI(
+            [MarshalAs(UnmanagedType.BStr)] out string Filename,
+            [MarshalAs(UnmanagedType.BStr)] out string AppendToTitle,
+            [MarshalAs(UnmanagedType.BStr)] out string Template);
+    }
+
+    /// <summary>
+    /// 文件 UI 事件 sink(宿主:Application 连接点 / FileUIEvents 属性)。
+    /// 守则:只观察、不干预——记录事件后一律返回 E_NOTIMPL,让 SE 照常弹它自己的对话框。
+    /// 这是同步回调链路(SE 弹框前会等这个返回值),回调里零 COM、零阻塞。
+    /// 2026-09-20 修正:旧实现返回 S_OK+null,实际效果是取消用户命令。
+    /// </summary>
+    internal sealed class FileUIEventsSink : IFileUIEventsNonIntrusive
+    {
+        /// <summary>E_NOTIMPL:SE 视作"没有应用监听该事件",照常弹自己的对话框。</summary>
+        private const int ENotImpl = unchecked((int)0x80004001);
+
         private readonly EventHub _hub;
         public FileUIEventsSink(EventHub hub) { _hub = hub; }
 
-        public void OnFileOpenUI(out string Filename, out string AppendToTitle)
+        public int OnFileOpenUI(out string Filename, out string AppendToTitle)
         {
             _hub.Record("ISEFileUIEvents", "OnFileOpenUI", "");
-            Filename = null;
-            AppendToTitle = null;
+            return PassThrough(out Filename, out AppendToTitle);
         }
 
-        public void OnFileSaveAsUI(out string Filename, out string AppendToTitle)
+        public int OnFileSaveAsUI(out string Filename, out string AppendToTitle)
         {
             _hub.Record("ISEFileUIEvents", "OnFileSaveAsUI", "");
-            Filename = null;
-            AppendToTitle = null;
+            return PassThrough(out Filename, out AppendToTitle);
         }
 
-        public void OnFileNewUI(out string Filename, out string AppendToTitle)
+        public int OnFileNewUI(out string Filename, out string AppendToTitle)
         {
             _hub.Record("ISEFileUIEvents", "OnFileNewUI", "");
-            Filename = null;
-            AppendToTitle = null;
+            return PassThrough(out Filename, out AppendToTitle);
         }
 
-        public void OnFileSaveAsImageUI(out string Filename, out string AppendToTitle, ref int Width, ref int Height, ref SeImageQualityType ImageQuality)
+        public int OnFileSaveAsImageUI(out string Filename, out string AppendToTitle, ref int Width, ref int Height, ref SeImageQualityType ImageQuality)
         {
             _hub.Record("ISEFileUIEvents", "OnFileSaveAsImageUI",
                 "W=" + Width + " H=" + Height + " Quality=" + ImageQuality);
-            Filename = null;
-            AppendToTitle = null;
+            return PassThrough(out Filename, out AppendToTitle);
         }
 
-        public void OnPlacePartUI(out string Filename, out string AppendToTitle)
+        public int OnPlacePartUI(out string Filename, out string AppendToTitle)
         {
             _hub.Record("ISEFileUIEvents", "OnPlacePartUI", "");
-            Filename = null;
-            AppendToTitle = null;
+            return PassThrough(out Filename, out AppendToTitle);
         }
 
-        public void OnCreateInPlacePartUI(out string Filename, out string AppendToTitle, out string Template)
+        public int OnCreateInPlacePartUI(out string Filename, out string AppendToTitle, out string Template)
         {
             _hub.Record("ISEFileUIEvents", "OnCreateInPlacePartUI", "");
+            Template = null;
+            return PassThrough(out Filename, out AppendToTitle);
+        }
+
+        /// <summary>统一出口:字符串留空 + E_NOTIMPL = "我不处理,请 SE 走自己的对话框"。</summary>
+        private static int PassThrough(out string Filename, out string AppendToTitle)
+        {
             Filename = null;
             AppendToTitle = null;
-            Template = null;
+            return ENotImpl;
         }
     }
 
