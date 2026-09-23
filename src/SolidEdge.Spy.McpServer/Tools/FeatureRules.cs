@@ -1200,6 +1200,16 @@ namespace SolidEdge.Spy.McpServer.Tools
                 yield return ctx.Error("E412", "pitch|height|revolutions",
                     "helix 需给出 pitch(螺距,m)/ height(高度,m)/ revolutions(圈数)中【至少 2 个】,第三个由 SE 推导(当前只给了 " + given + " 个)。",
                     new { action = "provide", fields = new[] { "pitch", "height", "revolutions" }, give = "至少 2/3" });
+
+            // 2026-09-23 真机实测:helix 螺距 vs 线径(2r)——重叠≥50%(pitch=0.006,r=0.006)必得僵尸
+            // Status=1216476311(SE 官方博客:"cross section diameter cannot be the same or larger than
+            // the minimum pitch"是对设计者的保守指引);但重叠~8%(pitch=0.011,r=0.006)SE 实际能成体。
+            // 阈值在 (r, 2r] 之间未定,故只对实证边界 pitch<r 给 W 警告,轻度重叠靠真机兜底。
+            if (s.Pitch.HasValue && s.HasCircle && s.CircleR > 0 && s.Pitch.Value < s.CircleR)
+                yield return ctx.Warn("W412", "pitch",
+                    "螺距(" + GeoUtil.Fmt(s.Pitch.Value) + "m) < 线半径(" + GeoUtil.Fmt(s.CircleR) +
+                    "m):相邻圈重叠超半线径,SE 大概率拒绝成体(僵尸 1216476311)。建议 pitch > 2×circle 半径最稳。",
+                    new { action = "set", field = "pitch", must = "> 2r", unit = "m" });
         }
     }
 
@@ -1345,6 +1355,28 @@ namespace SolidEdge.Spy.McpServer.Tools
                 yield return ctx.Error("E414", "target",
                     "target 必须是 @别名 或 obj-K 句柄(当前 \"" + s.Target + "\")。",
                     new { action = "set", field = "target", example = "@base" });
+                yield break;
+            }
+
+            // 2026-09-23 真机批次发现:@别名 只查了前缀没查存在性,@nope 静默通过(负例 n6 漏报)。
+            // 对齐 faceOf 的 E204 逻辑:本批名字表查存在性 + 前向引用。
+            if (!string.IsNullOrEmpty(s.Target) && s.Target.StartsWith("@", StringComparison.Ordinal))
+            {
+                string key = s.Target.Substring(1);
+                int defIdx;
+                if (!ctx.DefinedFeatures.TryGetValue(key, out defIdx))
+                {
+                    yield return ctx.Error("E414", "target",
+                        "未找到本批内命名特征 \"" + s.Target + "\"(需先给前面的特征带 name 创建)。",
+                        new { action = "define_feature", name = key, beforeFeature = ctx.Index });
+                }
+                else if (defIdx >= ctx.Index)
+                {
+                    yield return ctx.Error("E414", "target",
+                        "\"" + s.Target + "\" 是在第 " + defIdx + " 个特征定义的,不能在当前第 " + ctx.Index +
+                        " 个特征(前向引用)使用——必须把那个特征移到前面。",
+                        new { action = "reorder", moveFeature = defIdx, beforeFeature = ctx.Index });
+                }
             }
         }
     }

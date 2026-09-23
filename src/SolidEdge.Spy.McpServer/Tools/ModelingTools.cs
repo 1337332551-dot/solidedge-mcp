@@ -1237,7 +1237,7 @@ namespace SolidEdge.Spy.McpServer.Tools
         /// 返回:目标 Face COM 对象;失败抛 ArgumentException(由调用方 catch 包装成 error result)。
         /// </summary>
         private static object ResolveFaceRef(SolidEdgeContext context, object doc, FaceRefSpec faceRef,
-            Dictionary<string, object> namedFeatures, out List<string> warnings)
+            Dictionary<string, object> namedFeatures, out List<string> warnings, bool blendMode = false)
         {
             warnings = new List<string>();
             if (faceRef == null || !string.IsNullOrEmpty(faceRef.ParseError))
@@ -1327,9 +1327,25 @@ namespace SolidEdge.Spy.McpServer.Tools
             }
             else
             {
-                // 都没给:取第一个平面面(draft 默认场景)
-                targetFace = planeFaces[0];
-                warnings.Add("未给 faceNormal 或 faceIndex,取第一个平面面(Face.ID=" + SafeInt(Get(targetFace, "ID")) + ")。");
+                if (blendMode)
+                {
+                    // 2026-09-23 真机:delete_face 语义是删 blend/round 面——PartFeature.Faces COM 侧读不出
+                    // (TargetParameterCountException),无法按特征产出面定位。改为:默认取第一个非平面面
+                    // (TryGetFaceNormal=null 即 blend/圆柱面,DeleteBlends 通道目标)。draft/thicken 不受影响。
+                    foreach (var f in planeFaces)
+                    {
+                        if (TryGetFaceNormal(f) == null) { targetFace = f; break; }
+                    }
+                    if (targetFace == null)
+                        throw new ArgumentException("模型里没有非平面面(圆角/圆柱面)可删——请确认已建 fillet,或用 faceNormal/faceIndex 显式指定。");
+                    warnings.Add("未给 faceNormal/faceIndex,默认取第一个非平面面(Face.ID=" + SafeInt(Get(targetFace, "ID")) + ",blend 删除候选)。");
+                }
+                else
+                {
+                    // 都没给:取第一个平面面(draft 默认场景)
+                    targetFace = planeFaces[0];
+                    warnings.Add("未给 faceNormal 或 faceIndex,取第一个平面面(Face.ID=" + SafeInt(Get(targetFace, "ID")) + ")。");
+                }
             }
 
             return targetFace;
@@ -1370,6 +1386,9 @@ namespace SolidEdge.Spy.McpServer.Tools
             try
             {
                 var f = (SolidEdgeGeometry.Face)face;
+                // 2026-09-23 真机:圆柱/blend 面的圆弧边 GetEndPoints 给弦向量,两条弦不共线照样叉积出
+                // "假法向"——blend 面被误判平面。先强类型 QI:Geometry 不是 Plane 即非平面面,直接 null。
+                if (!(f.Geometry is SolidEdgeGeometry.Plane)) return null;
                 var edges = (SolidEdgeGeometry.Edges)f.Edges;
                 int ec = edges.Count;
                 if (ec < 2) return null;
@@ -1795,7 +1814,7 @@ namespace SolidEdge.Spy.McpServer.Tools
 
             List<string> warnings;
             object targetFace;
-            try { targetFace = ResolveFaceRef(context, doc, spec.FaceRef, namedFeatures, out warnings); }
+            try { targetFace = ResolveFaceRef(context, doc, spec.FaceRef, namedFeatures, out warnings, blendMode: true); }
             catch (Exception ex)
             {
                 return new { op = "delete_face", name = name, status = "error", message = "面引用解析失败:" + ex.Message };
@@ -1810,8 +1829,17 @@ namespace SolidEdge.Spy.McpServer.Tools
             try
             {
                 object feat = ((SolidEdgePart.Model)model).DeleteBlends.Add(targetFace);
-                return FeatureResult("delete_face", name, feat, context, null, "DeleteBlend", warnings,
-                    new { faceOf = spec.FaceRef.FeatureName, faceIndex = spec.FaceRef.Index, kind = "blend" });
+                long st = 0;
+                try { st = Convert.ToInt64(Get(feat, "Status")); } catch { }
+                if (st == 1216476310)
+                {
+                    return FeatureResult("delete_face", name, feat, context, null, "DeleteBlend", warnings,
+                        new { faceOf = spec.FaceRef.FeatureName, faceIndex = spec.FaceRef.Index, kind = "blend" });
+                }
+                // 2026-09-23 真机:对非 blend 面(如孔圆柱面),DeleteBlends 不抛异常而是产出 Status=6311
+                // 僵尸特征——按异常切通道的旧逻辑永远走不到 DeleteFaces。此处删掉僵尸再抛给兜底通道。
+                try { Get(feat, "Delete"); } catch { }
+                throw new InvalidOperationException("DeleteBlends 未成体(Status=" + st + "),目标疑似非 blend 面");
             }
             catch (Exception blendEx)
             {
@@ -1978,9 +2006,20 @@ namespace SolidEdge.Spy.McpServer.Tools
                 }
 
                 object coll = Get(model, isCut ? "LoftedCutouts" : "LoftedProtrusions");
-                // MaterialSide=igLeft(1)、Start/EndTangentType=igNone(44):SDK VB 示例取值
-                object featObj = Call(coll, "AddSimple",
-                    new object[] { n, sections, types, origins, 1, 44, 44 });
+                // ★ AddSimple 含 SAFEARRAY 参数(CrossSections/Origins):本机实测 IDispatch 手工封送通道
+                //   直接崩 SE(0x800706BE RPC 失败,2026-09-23,SE 2022)——与 sweep/helix 同因,必须走 PIA 强类型。
+                //   强类型 9 参 = 7 必选 + NumGuideCurves/GuideCurves(无导线传 0/null),Interop.dll 反射核实。
+                //   MaterialSide=igLeft(1)、Start/EndTangentType=igNone(44):SDK VB 示例取值。
+                Array sectionArr = sections, typeArr = types, originArr = origins;
+                object featObj = isCut
+                    ? ((SolidEdgePart.LoftedCutouts)coll).AddSimple(n, sectionArr, typeArr, originArr,
+                        SolidEdgePart.FeaturePropertyConstants.igLeft,
+                        SolidEdgePart.FeaturePropertyConstants.igNone,
+                        SolidEdgePart.FeaturePropertyConstants.igNone, 0, null)
+                    : ((SolidEdgePart.LoftedProtrusions)coll).AddSimple(n, sectionArr, typeArr, originArr,
+                        SolidEdgePart.FeaturePropertyConstants.igLeft,
+                        SolidEdgePart.FeaturePropertyConstants.igNone,
+                        SolidEdgePart.FeaturePropertyConstants.igNone, 0, null);
 
                 return FeatureResult("loft", name, featObj, context, profiles.Count > 0 ? profiles[0] : null,
                     isCut ? "LoftedCutout" : "LoftedProtrusion", specWarnings,

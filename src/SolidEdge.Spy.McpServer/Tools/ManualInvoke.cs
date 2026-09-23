@@ -238,6 +238,12 @@ internal static class ManualInvoke
 			Marshal.WriteInt16(v, 0, 10);
 			Marshal.WriteInt32(v, 8, -2147352572);
 		}
+		else if (value is double[] dblArr)
+		{
+			// 2026-09-23 本机真机:loft/sweep 的 Origins 每项是 double[2](截面锚点),
+			// 此前落入标量链抛 NotSupportedException("Double[]")。封成 VT_ARRAY|VT_R8 一维向量。
+			WriteDoubleArrayVariant(v, dblArr);
+		}
 		else if (value is object[] arr)
 		{
 			WriteArrayVariant(v, arr);
@@ -409,5 +415,33 @@ internal static class ManualInvoke
 		{
 			Marshal.WriteInt64(v, i, 0L);
 		}
+	}
+
+	private static void WriteDoubleArrayVariant(nint v, double[] values)
+	{
+		nint num = SafeArrayCreateVector(5, 0, values.Length);
+		if (num == IntPtr.Zero)
+		{
+			throw new OutOfMemoryException("SafeArrayCreateVector(VT_R8) 失败");
+		}
+		nint num2 = Marshal.AllocHGlobal(8);
+		try
+		{
+			for (int i = 0; i < values.Length; i++)
+			{
+				Marshal.WriteInt64(num2, BitConverter.DoubleToInt64Bits(values[i]));
+				int hr = SafeArrayPutElement(num, new int[1] { i }, num2);
+				if (hr != 0)
+				{
+					throw new COMException("SafeArrayPutElement(R8) hr=0x" + hr.ToString("X8"), hr);
+				}
+			}
+		}
+		finally
+		{
+			Marshal.FreeHGlobal(num2);
+		}
+		Marshal.WriteInt16(v, 0, 8197);
+		Marshal.WriteIntPtr(v, 8, num);
 	}
 }
