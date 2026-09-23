@@ -98,6 +98,13 @@ namespace SolidEdge.Spy.McpServer.Tools
         /// <summary>本批 plane op 定义的别名 → 定义所在序号。用于 @name 的未定义/前向引用判定。</summary>
         public Dictionary<string, int> DefinedPlanes = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>
+        /// 本批【所有 op 带 name】定义的特征别名 → 定义所在序号(P3 新增)。
+        /// 用于 faceOf 的 @别名 引用未定义/前向引用判定(E204)。
+        /// 与 DefinedPlanes 并列:plane op 同时进两表;非 plane op 只进本表。
+        /// </summary>
+        public Dictionary<string, int> DefinedFeatures = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
         public Issue Error(string code, string field, string message, object fix = null)
         {
             return Make(code, "error", field, message, fix);
@@ -163,7 +170,7 @@ namespace SolidEdge.Spy.McpServer.Tools
             new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
         /// <summary>规则集版本。规则增删/改级时 +1。</summary>
-        public const string Version = "1.1";   // 1.1:补 W406/W407 + E103 覆盖 dims/autoConstraint/fixOrigin
+        public const string Version = "1.4";   // 1.4:P3 面引用机制(E204 FeatureRefRule;DefinedFeatures 字典;draft/split/web_network/thicken/delete_face 五 op)
 
         /// <summary>零件文档默认参考面个数。中文版 DisplayName 是「参考平面_N」,只能按索引取。</summary>
         public const int DefaultRefPlaneCount = 3;
@@ -202,6 +209,7 @@ namespace SolidEdge.Spy.McpServer.Tools
 
             // 别名表先全量建好,规则自己按序号判断"是不是前向引用"。
             var defined = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var definedFeatures = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < specs.Count; i++)
             {
                 var s = specs[i];
@@ -209,6 +217,12 @@ namespace SolidEdge.Spy.McpServer.Tools
                 {
                     if (!defined.ContainsKey(s.Name))
                         defined[s.Name] = i;
+                }
+                // P3:所有 op 带 name 都进 DefinedFeatures(供 faceOf @别名 引用判定)
+                if (!string.IsNullOrEmpty(s.Name))
+                {
+                    if (!definedFeatures.ContainsKey(s.Name))
+                        definedFeatures[s.Name] = i;
                 }
             }
 
@@ -219,7 +233,8 @@ namespace SolidEdge.Spy.McpServer.Tools
                     Specs = specs,
                     Current = specs[i],
                     Index = i,
-                    DefinedPlanes = defined
+                    DefinedPlanes = defined,
+                    DefinedFeatures = definedFeatures
                 };
 
                 foreach (var rule in Rules)

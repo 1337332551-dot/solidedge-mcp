@@ -29,6 +29,17 @@ namespace SolidEdge.Spy.McpServer.Tools
     ///   rib     筋板/薄台(Ribs.Add):★闭合轮廓+plane 贴实体表面才出几何(SE 2022 实测,开放链不支持)
     ///   pattern 矩形阵列:SE 2022 COM 不可达(AddByRectangular 全种子 E_FAIL),诚实拒绝并给替代方案
     ///
+    /// P3 面引用机制(P2 之后):前序特征带 name 登记为 @别名,供 faceOf 引用其产出面;
+    ///   面选择:faceOf(@别名/obj-K,仅做存在性校验) + faceNormal([nx,ny,nz] 法向命中) 或 faceIndex(全量面列表 0-based 序号)。
+    ///   draft      拔模(Drafts.Add):faceOf 目标面 + angle(弧度,默认 π/36) + side(只认 4=igInside/5=igOutside);
+    ///             refPlane 必须与目标面相交(枢轴语义),否则 6311
+    ///   split      分割(Splits.Add):target 须 @别名/obj-K;用平面分割实体
+    ///   extrude_surface 曲面拉伸(Constructions.ExtrudedSurfaces.AddFinite):轮廓拉成【曲面】非实体;产物面缓存供 thicken
+    ///   thicken    曲面加厚(Thickens.Add):faceOf 指向 extrude_surface;★ SE 2022 该 COM 通道不可达(全组合 E_INVALIDARG),诚实拒绝
+    ///   web_network 腹板网(WebNetworks.Add):闭合轮廓+thickness+depth;ExtentType/ProfileExtensionType 用专属枚举
+    ///             (seWebExtendFinite+seWebProfileNoExtend,勿混用通用 FeaturePropertyConstants)
+    ///   delete_face 删面(DeleteBlends.Add 删 blend/round + DeleteFaces.Add 兜底):需 confirm:true;删圆角面用 faceNormal 命中
+    ///
     /// 草图形状:circle 圆({center,radius} 或 [cx,cy,r];圆轮廓拉伸即真圆柱,无需旋转)/
     ///           circles 多真圆([[x,y,r],...],一个轮廓多环,一次切/拉多个真圆孔)/
     ///           rect 两角点矩形 / polygon 显式多边形点列(自动闭合)/ loops 多环。
@@ -73,10 +84,15 @@ namespace SolidEdge.Spy.McpServer.Tools
         /// 返回每个特征的名称/Status(1216476310=正常,1216476311=几何未生成)/面数/句柄。
         /// 坐标单位为米。
         /// </summary>
-        [McpServerTool, Description("高级声明式建模:一次调用创建多个特征(拉伸/除料/旋转/局部参考面/圆角/倒角/筋板)。" +
+        [McpServerTool, Description("高级声明式建模:一次调用创建多个特征(拉伸/除料/打孔/旋转/放样/扫掠/螺旋/局部参考面/圆角/倒角/筋板)。" +
             "扩 op:fillet 圆角 {op,radius,edges:[{face:'face:ID',edge:0-based}]};" +
             "chamfer 等距倒角 {op,distance,edges};rib 筋板 {op,plane,闭合轮廓,thickness}(轮廓须闭合且 plane 贴实体表面);" +
-            "pattern 阵列在 SE 2022 COM 不可达(诚实拒绝,多孔阵列改用一个 cut+circles)。" +
+            "hole 圆孔 {op,plane,circle|circles 或 center+diameter, mode?:through_all(默认贯穿)/finite(盲孔需depth)/next};" +
+            "pattern 阵列在 SE 2022 COM 不可达(诚实拒绝,多孔阵列改用一个 cut+circles 或 hole+circles)。" +
+            "P2 扩 op(多轮廓,均需先有基体特征,首特征通道未开放):" +
+            "loft 放样 {op:'loft', profiles:[{plane,形状},...]≥2 项单闭合轮廓, origin?:[u,v] 截面锚点(缺省按形状推导), mode?:'cut'(默认凸台)};" +
+            "sweep 扫掠 {op:'sweep', profiles:[首项=路径,其余=截面]}——路径用 polygon 时按【开放链】解释(≥2 点不闭合),circle/rect/loops 则是闭合路径(扫一整圈);" +
+            "helix 螺旋 {op:'helix', plane, 单闭合截面, axis(同 revolve 的两点轴), pitch/height/revolutions 三给二(螺距m/高度m/圈数,第三个由SE推导), mode?:'cut'}。" +
             "features 每项 {op, name?, plane|base, 形状, side, profileside, depth, axis?, angle?|degrees?, visible?}。" +
             "op=revolve 旋转凸台(默认)或旋转切割(mode:\"cut\"走 RevolvedCutout):截面用 rect/polygon/loops,必须给 axis 旋转轴两点(草图平面局部 u/v," +
             "如 \"axis\":[[0,0],[0,0.05]] 沿局部 v 轴);angle 弧度(默认 2π 整圈)或 degrees 度。" +
@@ -105,7 +121,8 @@ namespace SolidEdge.Spy.McpServer.Tools
             [Description("特征列表(JSON 数组),每项见工具描述")] JsonElement[] features,
             [Description("起始对象句柄(零件文档),可省略;省略时用当前活动文档")] string objectId = null,
             [Description("期望的文档名(可选守卫):与当前目标文档 Name 不符时立即拒绝、一个特征都不建,防误建到别的文档。强烈建议每次都传")] string expectDocument = null,
-            [Description("true=只做静态校验并返回报告,不建任何特征(不启动 COM);默认 false")] bool dryRun = false)
+            [Description("true=只做静态校验并返回报告,不建任何特征(不启动 COM);默认 false")] bool dryRun = false,
+            [Description("true=全部特征建完后对模型执行一次 Recompute(统一重算);默认 false(SE 建特征时已自动重算,一般不需要)")] bool recomputeAfter = false)
         {
             try
             {
@@ -161,6 +178,10 @@ namespace SolidEdge.Spy.McpServer.Tools
 
                     // 本批内命名局部参考面:name → RefPlane COM 对象
                     var namedPlanes = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                    // P3:本批内命名特征:name → 特征 COM 对象(供 faceOf @别名 引用产出面)
+                    var namedFeatures = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                    // P3.4:extrude_surface 产物面缓存:name → 曲面体面列表(AddFinite 返回对象与 Constructions.Item 不同 RCW,按名缓存最稳)
+                    var surfaceFaces = new Dictionary<string, List<object>>(StringComparer.OrdinalIgnoreCase);
                     var results = new List<object>();
 
                     // 统一走 FeatureSpec 解析:构建器与静态校验器(FeatureValidator)共用同一份取数语义,
@@ -189,6 +210,9 @@ namespace SolidEdge.Spy.McpServer.Tools
                                 case "cut":
                                     result = CutOp(context, doc, spec, name, namedPlanes);
                                     break;
+                                case "hole":
+                                    result = HoleOp(context, doc, spec, name, namedPlanes);
+                                    break;
                                 case "revolve":
                                     result = RevolveOp(context, doc, spec, name, namedPlanes);
                                     break;
@@ -204,8 +228,36 @@ namespace SolidEdge.Spy.McpServer.Tools
                                 case "pattern":
                                     result = PatternOp(context, doc, spec, name, namedPlanes);
                                     break;
+                                case "loft":
+                                    result = LoftOp(context, doc, spec, name, namedPlanes);
+                                    break;
+                                case "sweep":
+                                    result = SweepOp(context, doc, spec, name, namedPlanes);
+                                    break;
+                                case "helix":
+                                    result = HelixOp(context, doc, spec, name, namedPlanes);
+                                    break;
+                                // P3 面引用机制 op(namedFeatures 供面引用解析;登记由主循环统一做)
+                                case "draft":
+                                    result = DraftOp(context, doc, spec, name, namedPlanes, namedFeatures);
+                                    break;
+                                case "split":
+                                    result = SplitOp(context, doc, spec, name, namedPlanes, namedFeatures);
+                                    break;
+                                case "web_network":
+                                    result = WebNetworkOp(context, doc, spec, name, namedPlanes, namedFeatures);
+                                    break;
+                                case "extrude_surface":
+                                    result = ExtrudeSurfaceOp(context, doc, spec, name, namedPlanes, namedFeatures, surfaceFaces);
+                                    break;
+                                case "thicken":
+                                    result = ThickenOp(context, doc, spec, name, namedFeatures, surfaceFaces);
+                                    break;
+                                case "delete_face":
+                                    result = DeleteFaceOp(context, doc, spec, name, namedFeatures);
+                                    break;
                                 default:
-                                    result = new { op = op, name = name, status = "error", message = "未知 op(仅支持 plane/extrude/cut/revolve/fillet/chamfer/rib/pattern)。" };
+                                    result = new { op = op, name = name, status = "error", message = "未知 op(仅支持 plane/extrude/cut/hole/revolve/fillet/chamfer/rib/pattern/loft/sweep/helix/draft/split/web_network/extrude_surface/thicken/delete_face)。" };
                                     break;
                             }
                         }
@@ -216,6 +268,24 @@ namespace SolidEdge.Spy.McpServer.Tools
 
                         results.Add(result);
 
+                        // P3:成功的特征带 name 时登记到 namedFeatures,供后续 faceOf @别名 引用产出面。
+                        // 不改 FeatureResult / 现有 op 签名——通过 result.handle 反查 context 拿 featObj COM 对象。
+                        if (IsOk(result) && !string.IsNullOrEmpty(name))
+                        {
+                            try
+                            {
+                                var hProp = result.GetType().GetProperty("handle");
+                                string hid = hProp?.GetValue(result) as string;
+                                if (!string.IsNullOrEmpty(hid))
+                                {
+                                    var h = context.GetHandle(hid);
+                                    if (h != null && h.ComObject != null)
+                                        namedFeatures[name] = h.ComObject;
+                                }
+                            }
+                            catch { /* 登记失败不影响主流程,最坏是后续 faceOf 引用报"未找到" */ }
+                        }
+
                         // 只要有一个特征没建成(参数错 / 建出来是僵尸且已回滚)就停:
                         // 后面的特征多半依赖前面的实体,硬着头皮继续只会连环失败、留一树僵尸。
                         if (!IsOk(result))
@@ -225,11 +295,37 @@ namespace SolidEdge.Spy.McpServer.Tools
                         }
                     }
 
+                    // recomputeAfter(2026-09-23 P1):全部特征建完后统一重算。
+                    // 有特征失败时不重算——僵尸已回滚,半成品模型重算意义不大,先让调用方修参数。
+                    string recomputeNote = null;
+                    if (recomputeAfter && !aborted)
+                    {
+                        try
+                        {
+                            object models = Get(doc, "Models");
+                            if (Count(models) > 0)
+                            {
+                                Call(Get(models, "Item", 1), "Recompute", new object[0]);
+                                recomputeNote = "已对模型执行 Recompute。";
+                            }
+                            else
+                            {
+                                recomputeNote = "模型为空,跳过 Recompute。";
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            recomputeNote = "Recompute 失败(特征已建成): " + DescribeException(ex);
+                        }
+                    }
+
                     return JsonSerializer.Serialize(new
                     {
                         status = aborted ? "error" : "ok",
                         featureCount = results.Count,
                         aborted = aborted,
+                        recomputeAfter = recomputeAfter,
+                        recompute = recomputeNote,
                         message = aborted
                             ? "第 " + results.Count + " 个特征未建成(失败特征已自动回滚删除),后续特征已停止执行," +
                               "以免连环失败。请按该条的 diagnosis 修正后重跑。"
@@ -484,9 +580,13 @@ namespace SolidEdge.Spy.McpServer.Tools
                 new { plane = spec.PlaneRef, side = side, profileside = profileSide, depth = depth });
         }
 
+        // opLabel:返回结果里的 op 名(hole 复用本管线时传 "hole",其余用默认 "cut")。
         private static object CutOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name,
-            Dictionary<string, object> namedPlanes)
+            Dictionary<string, object> namedPlanes, string opLabel = "cut")
         {
+            // 中文称呼:报错文案随入口语义变化(除料 / 打孔)
+            string kindCn = opLabel == "hole" ? "打孔" : "除料";
+
             object plane = ResolvePlane(context, doc, spec.PlaneRef, namedPlanes);
             bool visible = spec.Visible ?? false;
 
@@ -498,7 +598,7 @@ namespace SolidEdge.Spy.McpServer.Tools
 
             object models = Get(doc, "Models");
             if (Count(models) == 0)
-                return new { op = "cut", name = name, status = "error", message = "除料前必须先建实体(extrude)。" };
+                return new { op = opLabel, name = name, status = "error", message = kindCn + "前必须先建实体(extrude)。" };
 
             object model = Get(models, "Item", 1);
             object cutouts = Get(model, "ExtrudedCutouts");
@@ -597,13 +697,13 @@ namespace SolidEdge.Spy.McpServer.Tools
                 //   被当成"读不到状态但调用没报错"而判成功,于是返回一个已删对象的句柄 + status=ok。
                 return new
                 {
-                    op = "cut",
+                    op = opLabel,
                     name = name,
                     status = "error",
                     resolved = cutResolved,
-                    message = "除料在所有方向组合下都未生成几何(Status=" + StatusZombie + " 僵尸),已逐一回滚。" +
+                    message = kindCn + "在所有方向组合下都未生成几何(Status=" + StatusZombie + " 僵尸),已逐一回滚。" +
                               "常见原因:草图画在默认 RefPlane 而非实体外表面的局部 RefPlane;或草图落在毛坯范围之外。",
-                    diagnosis = "除料没切到实体:检查 plane 是否选对、草图是否落在毛坯范围内。",
+                    diagnosis = kindCn + "没切到实体:检查 plane 是否选对、草图是否落在毛坯范围内。",
                     fix = new { action = "fix_and_retry", check = new[] { "plane", "形状位置" } }
                 };
             }
@@ -615,7 +715,37 @@ namespace SolidEdge.Spy.McpServer.Tools
                 specWarnings.Add("除料后实体包围盒显著缩小(疑似切反了方向),但已无其它方向组合可试,已按首次成功的结果保留。" +
                                  "请目检确认;必要时显式指定 side / profileside。");
 
-            return FeatureResult("cut", name, bestFeat, context, bestProfile, null, specWarnings, cutResolved);
+            return FeatureResult(opLabel, name, bestFeat, context, bestProfile, null, specWarnings, cutResolved);
+        }
+
+        /// <summary>
+        /// 孔(hole):圆孔专用入口,复用除料管线(cut 的方向自愈/僵尸回滚/包围盒判挖反全套照用)。
+        /// ★ 设计依据 docs/se_model_build-特征补全计划.md P1:首选复用 cut 体系(圆 profile +
+        ///   ExtrudedCutouts.AddThroughAll 等),而【不是】 Holes.Add* —— 对照表实测记录:
+        ///   Holes.Add* "记录特征但可能不切材料"(孔表/螺纹需求出现前,不引真 hole 特征)。
+        /// 限定:形状必须 circle/circles(解析器已支持 center+diameter 合成单圆),异形孔诚实分流回 cut;
+        /// 默认贯穿(through_all → mode="all"),与 cut 的默认 next 不同——孔的心智默认是打穿。
+        /// </summary>
+        private static object HoleOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name,
+            Dictionary<string, object> namedPlanes)
+        {
+            if (!spec.HasCircle && !spec.HasCircles)
+                return new
+                {
+                    op = "hole",
+                    name = name,
+                    status = "error",
+                    message = "hole 需要 circle/circles(圆孔轮廓)或 center+diameter(米);非圆异形孔请用 cut。"
+                };
+
+            // mode 归一:through_all/through → all(贯穿)。合法值已由静态校验 E409 把关,
+            // 这里兜底再收敛一次,防止绕过校验的调用路径把脏值带进 cut 管线。
+            string mode = (spec.Mode ?? "all").Trim().ToLowerInvariant();
+            if (mode == "through_all" || mode == "through") mode = "all";
+            if (mode != "all" && mode != "next" && mode != "finite") mode = "all";
+            spec.Mode = mode;
+
+            return CutOp(context, doc, spec, name, namedPlanes, "hole");
         }
 
         /// <summary>按 mode 调对应的除料 API(切穿所有 / 定深 / 切到下一面),供 cut 首次尝试与方向翻转重试共用。</summary>
@@ -1093,6 +1223,673 @@ namespace SolidEdge.Spy.McpServer.Tools
             return null;
         }
 
+        // ==================== P3 面引用机制运行时(2026-09-23) ====================
+
+        /// <summary>
+        /// 解析面引用:从 namedFeatures 查 @别名 对应的特征 COM 对象(存在性确认),
+        /// 然后从 Model.Body.Shells.Faces 按 faceNormal 或 faceIndex 选择目标面。
+        ///
+        /// 设计简化:faceOf @别名 仅做"特征存在"校验(静态校验已判未定义/前向引用);
+        /// 实际面选择走 faceNormal/faceIndex 从当前 Model 全量扫描——因为 SE 特征对象
+        /// 没有直接的"产出面集合"属性(thicken 需走 Constructions.Body.Faces,各类型路径不同,
+        /// 统一走 Model.Body 全量 + 法向/序号过滤更稳)。
+        ///
+        /// 返回:目标 Face COM 对象;失败抛 ArgumentException(由调用方 catch 包装成 error result)。
+        /// </summary>
+        private static object ResolveFaceRef(SolidEdgeContext context, object doc, FaceRefSpec faceRef,
+            Dictionary<string, object> namedFeatures, out List<string> warnings)
+        {
+            warnings = new List<string>();
+            if (faceRef == null || !string.IsNullOrEmpty(faceRef.ParseError))
+                throw new ArgumentException("面引用解析失败:" + (faceRef?.ParseError ?? "faceOf 未声明"));
+
+            string fof = faceRef.FeatureName;
+            if (string.IsNullOrWhiteSpace(fof))
+                throw new ArgumentException("faceOf 必须是非空字符串(@别名 或 obj-K 句柄)");
+
+            // 1) 确认特征存在(静态校验已判 @别名;这里只做运行时反查)
+            object featObj = null;
+            if (fof.StartsWith("@", StringComparison.Ordinal))
+            {
+                string key = fof.Substring(1);
+                if (!namedFeatures.TryGetValue(key, out featObj))
+                    throw new ArgumentException("未找到本批内命名特征 \"@" + key + "\"(需先给前面的特征带 name 创建)");
+            }
+            else if (fof.StartsWith("obj-", StringComparison.OrdinalIgnoreCase))
+            {
+                var h = context.GetHandle(fof);
+                if (h == null || h.ComObject == null)
+                    throw new ArgumentException("句柄表里找不到特征对象 " + fof);
+                featObj = h.ComObject;
+            }
+            else
+                throw new ArgumentException("faceOf 必须以 @ 或 obj- 开头(当前 \"" + fof + "\")");
+
+            // 2) 从 Model.Body.Shells.Faces 全量收集平面面(igPlane)
+            object models = Get(doc, "Models");
+            if (Count(models) == 0)
+                throw new ArgumentException("没有模型实体——面引用类 op 需先有基体特征");
+            object model = Get(models, "Item", 1);
+            var planeFaces = FindPlaneFaces(model);
+
+            if (planeFaces.Count == 0)
+                throw new ArgumentException("当前模型没有面——面引用类 op 需先有基体特征产出面");
+
+            // 3) 按 faceNormal 或 faceIndex 选择
+            object targetFace = null;
+            if (faceRef.Normal != null)
+            {
+                // 法向选择:点积 > 1-ε(同向)
+                double nx = faceRef.Normal[0], ny = faceRef.Normal[1], nz = faceRef.Normal[2];
+                double mag = System.Math.Sqrt(nx * nx + ny * ny + nz * nz);
+                nx /= mag; ny /= mag; nz /= mag;   // 归一化
+
+                var hits = new List<object>();
+                foreach (var f in planeFaces)
+                {
+                    double[] nrm = TryGetFaceNormal(f);
+                    if (nrm == null) continue;
+                    double dot = nrm[0] * nx + nrm[1] * ny + nrm[2] * nz;
+                    if (dot > 1 - 1e-6) hits.Add(f);
+                }
+
+                if (hits.Count == 0)
+                {
+                    var ids = new List<int>();
+                    foreach (var f in planeFaces)
+                    {
+                        int id = SafeInt(Get(f, "ID"));
+                        if (id > 0) ids.Add(id);
+                    }
+                    throw new ArgumentException("没有平面面的法向与 [" + faceRef.Normal[0] + "," + faceRef.Normal[1] + "," + faceRef.Normal[2] +
+                        "] 同向。可用平面面 Face.ID:" + string.Join(",", ids));
+                }
+
+                if (hits.Count > 1)
+                    warnings.Add("法向匹配到 " + hits.Count + " 个平面面,取第一个(可用 faceIndex 精确指定)。");
+
+                targetFace = hits[0];
+
+                // 同时给 faceIndex 则从 hits 里按序号取
+                if (faceRef.Index.HasValue)
+                {
+                    if (faceRef.Index.Value >= hits.Count)
+                        throw new ArgumentException("faceIndex=" + faceRef.Index.Value + " 越界(法向过滤后仅 " + hits.Count + " 个面)");
+                    targetFace = hits[faceRef.Index.Value];
+                }
+            }
+            else if (faceRef.Index.HasValue)
+            {
+                // 纯序号选择:从平面面列表里 0-based 取
+                if (faceRef.Index.Value >= planeFaces.Count)
+                    throw new ArgumentException("faceIndex=" + faceRef.Index.Value + " 越界(共 " + planeFaces.Count + " 个平面面)");
+                targetFace = planeFaces[faceRef.Index.Value];
+            }
+            else
+            {
+                // 都没给:取第一个平面面(draft 默认场景)
+                targetFace = planeFaces[0];
+                warnings.Add("未给 faceNormal 或 faceIndex,取第一个平面面(Face.ID=" + SafeInt(Get(targetFace, "ID")) + ")。");
+            }
+
+            return targetFace;
+        }
+
+        /// <summary>
+        /// 收集 Model.Body 所有 Shell 里的面(用于面引用类 op 选面)。
+        /// ★ 不按 GeometryForm 过滤:SE 2022 强类型 interop 下 Face.GeometryForm 返回 9(非对照表所称的
+        /// GNTTypePropertyConstants.igPlane=-1909484335——那是 SE 2026 pywin32 晚绑定的结论,通道不同)。
+        /// 改为收集全部面,平面面的判定与选择交给 TryGetFaceNormal(边叉积):平面面给出稳定法向,
+        /// 非平面面(圆柱/圆锥)的边是曲线,GetEndPoints 给弦方向,法向匹配时自然落选。
+        /// </summary>
+        private static List<object> FindPlaneFaces(object model)
+        {
+            var result = new List<object>();
+            object body = Get(model, "Body");
+            object shells = Get(body, "Shells");
+            int shellCount = Count(shells);
+            for (int s = 1; s <= shellCount; s++)
+            {
+                object faces = Get(Get(shells, "Item", s), "Faces");
+                int n = Count(faces);
+                for (int i = 1; i <= n; i++)
+                {
+                    result.Add(Get(faces, "Item", i));
+                }
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// 读平面面的法向(世界系 XYZ)。Vertex 没有直接 x/y/z 属性(SE SDK 实测),
+        /// 改走强类型 Edge.GetEndPoints(out StartPoint, out EndPoint)——返回两个 Double[3],
+        /// 取前两条不共线边的方向向量叉积得平面法向。失败返回 null(调用方跳过该面)。
+        /// </summary>
+        private static double[] TryGetFaceNormal(object face)
+        {
+            try
+            {
+                var f = (SolidEdgeGeometry.Face)face;
+                var edges = (SolidEdgeGeometry.Edges)f.Edges;
+                int ec = edges.Count;
+                if (ec < 2) return null;
+
+                double[] dir1 = EdgeDirection(edges.Item(1));
+                if (dir1 == null) return null;
+
+                // 找第二条不与 dir1 共线的边方向(共线叉积为 0,推不出法向)
+                double[] dir2 = null;
+                for (int i = 2; i <= ec; i++)
+                {
+                    var d = EdgeDirection(edges.Item(i));
+                    if (d != null && !IsParallel(dir1, d)) { dir2 = d; break; }
+                }
+                if (dir2 == null) return null;
+
+                double nx = dir1[1] * dir2[2] - dir1[2] * dir2[1];
+                double ny = dir1[2] * dir2[0] - dir1[0] * dir2[2];
+                double nz = dir1[0] * dir2[1] - dir1[1] * dir2[0];
+                double mag = System.Math.Sqrt(nx * nx + ny * ny + nz * nz);
+                if (mag < 1e-12) return null;
+                return new[] { nx / mag, ny / mag, nz / mag };
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>取边的方向向量(终点 - 起点),走 Edge.GetEndPoints 返回的两个 Double[3]。</summary>
+        private static double[] EdgeDirection(object edgeObj)
+        {
+            try
+            {
+                var edge = (SolidEdgeGeometry.Edge)edgeObj;
+                Array startPt = Array.CreateInstance(typeof(double), 0);
+                Array endPt = Array.CreateInstance(typeof(double), 0);
+                edge.GetEndPoints(ref startPt, ref endPt);
+                if (startPt == null || endPt == null || startPt.Length < 3 || endPt.Length < 3) return null;
+                return new[]
+                {
+                    Convert.ToDouble(endPt.GetValue(0), CultureInfo.InvariantCulture) - Convert.ToDouble(startPt.GetValue(0), CultureInfo.InvariantCulture),
+                    Convert.ToDouble(endPt.GetValue(1), CultureInfo.InvariantCulture) - Convert.ToDouble(startPt.GetValue(1), CultureInfo.InvariantCulture),
+                    Convert.ToDouble(endPt.GetValue(2), CultureInfo.InvariantCulture) - Convert.ToDouble(startPt.GetValue(2), CultureInfo.InvariantCulture)
+                };
+            }
+            catch { return null; }
+        }
+
+        private static bool IsParallel(double[] a, double[] b, double eps = 1e-6)
+        {
+            double cx = a[1] * b[2] - a[2] * b[1];
+            double cy = a[2] * b[0] - a[0] * b[2];
+            double cz = a[0] * b[1] - a[1] * b[0];
+            return System.Math.Sqrt(cx * cx + cy * cy + cz * cz) < eps;
+        }
+
+        // ==================== P3 新 op 实现(2026-09-23) ====================
+        // 签名依据 Interop.SolidEdge.dll 反射核实(非对照表的 pywin32 晚绑定形态):
+        //   Drafts.Add(plane, n, FaceSetArray[Object], DraftAngleArray[Object], DraftSide)
+        //   Splits.Add(nTargets, ref TargetArray, nTools, ref ToolsArray, DesignBodyOpt, ConstrBodyOpt)
+        //   WebNetworks.Add(nProfiles, ref Profile, thickness, WebDir, [ExtentType],[ProfileExtType],[FiniteDepth])
+        //   ExtrudedSurfaces.AddFinite(nProfiles, ref ProfileArray, ProfilePlaneSide, Depth, [WantEndCaps])  ← 在 Constructions 上
+        //   Thickens.Add(Side, offsetDistance, nFaces, ref Faces)  ← 在 Model 上
+        //   DeleteBlends.Add(BlendsToDelete[Object]) / DeleteFaces.Add(FaceSetToDelete[Object])
+
+        /// <summary>
+        /// draft 拔模:对一个或多个面施加拔模角,绕 refPlane 与面的交线旋转。
+        /// DraftSide 只认 igInside=4 / igOutside=5(传 1/2/3 全 E_FAIL,对照表真机验证)。
+        /// </summary>
+        private static object DraftOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name,
+            Dictionary<string, object> namedPlanes, Dictionary<string, object> namedFeatures)
+        {
+            if (!spec.Angle.HasValue || spec.Angle.Value <= 0)
+                return new { op = "draft", name = name, status = "error",
+                    message = "draft 必须提供 angle(弧度,且 > 0,通常 0.01~0.1)。" };
+            int side = spec.Side ?? 0;
+            if (side != 4 && side != 5)
+                return new { op = "draft", name = name, status = "error",
+                    message = "draft 的 side 必须是 4(igInside=向内拔模)或 5(igOutside=向外拔模);" +
+                              "SE 真机验证:传 1/2/3 一律 E_FAIL。" };
+
+            if (!spec.HasFaceRef)
+                return new { op = "draft", name = name, status = "error",
+                    message = "draft 需通过 faceOf 指定要拔模的面(如 \"faceOf\":\"@base\",\"faceNormal\":[0,0,1])。" };
+
+            object models = Get(doc, "Models");
+            if (Count(models) == 0)
+                return new { op = "draft", name = name, status = "error", message = "draft 前必须先有实体(extrude)。" };
+            object model = Get(models, "Item", 1);
+
+            object plane = ResolvePlane(context, doc, spec.PlaneRef, namedPlanes);
+
+            List<string> warnings;
+            object targetFace;
+            try { targetFace = ResolveFaceRef(context, doc, spec.FaceRef, namedFeatures, out warnings); }
+            catch (Exception ex)
+            {
+                return new { op = "draft", name = name, status = "error", message = "面引用解析失败:" + ex.Message };
+            }
+
+            try
+            {
+                object[] faceArr = new object[] { targetFace };
+                double[] angleArr = new double[] { spec.Angle.Value };
+                object feat = ((SolidEdgePart.Model)model).Drafts.Add(
+                    plane, 1, faceArr, angleArr,
+                    (SolidEdgePart.FeaturePropertyConstants)side);
+                return FeatureResult("draft", name, feat, context, null, "Draft", warnings,
+                    new { plane = spec.PlaneRef, faceOf = spec.FaceRef.FeatureName, angle = spec.Angle.Value, side = side });
+            }
+            catch (Exception ex)
+            {
+                return new { op = "draft", name = name, status = "error",
+                    message = "Drafts.Add 失败:" + DescribeException(ex) +
+                              "(常见原因:面不是可拔模面、拔模角过大自交、draft 枢轴面与目标面不相交)。" };
+            }
+        }
+
+        /// <summary>
+        /// split 分割:用 ref-plane 把目标实体切成两半。走 Splits.Add(nTargets, ref bodies, nTools, ref tools, ...)。
+        /// 对照表称对方"ref-plane 路径实测 OK"但那是 pywin32 晚绑定;本机强类型 interop 失败即入拒绝清单。
+        /// </summary>
+        private static object SplitOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name,
+            Dictionary<string, object> namedPlanes, Dictionary<string, object> namedFeatures)
+        {
+            object models = Get(doc, "Models");
+            if (Count(models) == 0)
+                return new { op = "split", name = name, status = "error", message = "split 前必须先有实体。" };
+            object model = Get(models, "Item", 1);
+
+            object plane = ResolvePlane(context, doc, spec.PlaneRef, namedPlanes);
+
+            // target 缺省用当前 Models.Item(1) 的 Body;给了 @别名/obj-K 则做存在性校验
+            if (!string.IsNullOrEmpty(spec.Target))
+            {
+                // target 仅做存在性校验(@别名/obj-K 已定义即通过);Body 一律取 Model.Body——
+                // 特征对象(ExtrudedProtrusion 等)没有 Body 属性(实测 GetIDsOfNames 失败 0x80020006),
+                // Body 是 Model 的成员,单实体场景目标体就是 Models.Item(1).Body。
+                try
+                {
+                    ResolveFeatureObject(context, spec.Target, namedFeatures);
+                }
+                catch (Exception ex)
+                {
+                    return new { op = "split", name = name, status = "error", message = "target 解析失败:" + ex.Message };
+                }
+            }
+            object targetBody = Get(model, "Body");
+
+            try
+            {
+                Array targetArr = new object[] { targetBody };
+                Array toolArr = new object[] { plane };
+                object feat = ((SolidEdgePart.Model)model).Splits.Add(
+                    1, ref targetArr, 1, ref toolArr,
+                    SolidEdgePart.SETargetDesignBodyOption.igCreateMultipleDesignBodiesOnNonManifoldOption,
+                    SolidEdgePart.SETargetConstructionBodyOption.igCreateSingleConstructionGeneralBodyOnNonManifoldOption);
+                return FeatureResult("split", name, feat, context, null, "Split", null,
+                    new { plane = spec.PlaneRef, target = spec.Target ?? "Models.Item(1)" });
+            }
+            catch (Exception ex)
+            {
+                return new
+                {
+                    op = "split", name = name, status = "error", unsupported = true,
+                    message = "Splits.Add 在 SE 强类型 interop 通道失败:" + DescribeException(ex) +
+                              "(对方项目称 ref-plane 路径 OK,但那是 pywin32 晚绑定,通道不同。)",
+                    alternatives = new[]
+                    {
+                        "用 cut 沿分割面切一刀(切开成两个体需后续处理)",
+                        "用 se_invoke_member 走晚绑定试 Splits.Add 的另一形态"
+                    },
+                    fix = new { action = "use_alternative", see = "alternatives" }
+                };
+            }
+        }
+
+        /// <summary>
+        /// web_network 腹板网:与 rib 并列的薄板特征,闭合轮廓 + 厚度 + 深度 + 方向。
+        /// WebNetworks.Add(nProfiles, ref Profile, thickness, WebDirection, [ExtentType],[ProfileExtType],[FiniteDepth])。
+        /// 方向 seWebNormal=1 / seWebReverseNormal=2(与 rib 的 MaterialSide=igRight=2 / igLeft=1 同向自愈语义)。
+        /// </summary>
+        private static object WebNetworkOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name,
+            Dictionary<string, object> namedPlanes, Dictionary<string, object> namedFeatures)
+        {
+            if (!spec.Thickness.HasValue || spec.Thickness.Value <= 0)
+                return new { op = "web_network", name = name, status = "error",
+                    message = "web_network 必须提供 thickness(米,且 > 0)。" };
+            if (spec.HasCircle || spec.HasCircles || spec.HasSlot || spec.Loops.Count > 0) { }
+            else
+                return new { op = "web_network", name = name, status = "error",
+                    message = string.IsNullOrEmpty(spec.ShapeError)
+                        ? "web_network 需闭合轮廓(rect/polygon/loops/circle)。"
+                        : spec.ShapeError };
+
+            object models = Get(doc, "Models");
+            if (Count(models) == 0)
+                return new { op = "web_network", name = name, status = "error", message = "web_network 前必须先有实体。" };
+            object model = Get(models, "Item", 1);
+            object plane = ResolvePlane(context, doc, spec.PlaneRef, namedPlanes);
+            bool visible = spec.Visible ?? false;
+
+            var specWarnings = new List<string>();
+            // 方向自愈:缺省 seWebNormal=1,僵尸则换 seWebReverseNormal=2(同 rib 思路)
+            int wd = spec.Side ?? 1;
+            bool wdFree = !spec.Side.HasValue;
+            object feat = null;
+            object profile = null;
+            int usedWd = wd;
+            int attempts = wdFree ? 2 : 1;
+            for (int attempt = 0; attempt < attempts; attempt++)
+            {
+                int candidate = attempt == 0 ? wd : (wd == 1 ? 2 : 1);
+                profile = CreateProfileForFeature(context, doc, plane, spec, visible, specWarnings);
+                try
+                {
+                    Array profArr = new object[] { profile };
+                    double depth = spec.Depth ?? 0;
+                    // ExtentType/ProfileExtensionType 用 WebNetwork 专属枚举(反射核实),勿混用通用 FeaturePropertyConstants
+                    // (实测 igFinite/igExtend 混传 → E_INVALIDARG):seWebExtendFinite+FiniteDepth、seWebProfileNoExtend(轮廓即边界)
+                    feat = ((SolidEdgePart.Model)model).WebNetworks.Add(
+                        1, ref profArr, spec.Thickness.Value,
+                        (SolidEdgePart.WebNetworkFeatureConstants)candidate,
+                        SolidEdgePart.WebNetworkFeatureConstants.seWebExtendFinite,
+                        SolidEdgePart.WebNetworkFeatureConstants.seWebProfileNoExtend,
+                        depth);
+                    long? st = SafeLong(Get(feat, "Status"));
+                    if (st.HasValue && st.Value != StatusZombie) { usedWd = candidate; break; }
+                    if (attempt < attempts - 1) { DiscardCutCandidate(profile, feat); feat = null; }
+                }
+                catch (Exception)
+                {
+                    if (attempt < attempts - 1) { DiscardCutCandidate(profile, null); }
+                    else throw;
+                }
+            }
+
+            var resolved = new { plane = spec.PlaneRef, thickness = spec.Thickness.Value, depth = spec.Depth, webDirection = usedWd };
+            if (feat == null)
+                return new { op = "web_network", name = name, status = "error", resolved = resolved,
+                    message = "web_network 在两个方向都未生成几何(6311 僵尸)。",
+                    diagnosis = "检查轮廓是否闭合、plane 是否贴合实体、方向是否朝实体。" };
+
+            return FeatureResult("web_network", name, feat, context, profile, "WebNetwork", specWarnings, resolved);
+        }
+
+        /// <summary>
+        /// extrude_surface 曲面拉伸:把轮廓拉成【曲面】(非实体),产物落在 doc.Constructions.ExtrudedSurfaces。
+        /// 随后 thicken 把曲面加厚成实体。AddFinite(nProfiles, ref ProfileArray, ProfilePlaneSide, Depth)。
+        /// </summary>
+        private static object ExtrudeSurfaceOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name,
+            Dictionary<string, object> namedPlanes, Dictionary<string, object> namedFeatures,
+            Dictionary<string, List<object>> surfaceFaces)
+        {
+            if (!spec.Depth.HasValue || spec.Depth.Value <= 0)
+                return new { op = "extrude_surface", name = name, status = "error",
+                    message = "extrude_surface 必须提供 depth(米,且 > 0)。" };
+            if (spec.HasCircle || spec.HasCircles || spec.HasSlot || spec.Loops.Count > 0) { }
+            else
+                return new { op = "extrude_surface", name = name, status = "error",
+                    message = string.IsNullOrEmpty(spec.ShapeError) ? "extrude_surface 需轮廓(rect/polygon/loops/circle)。" : spec.ShapeError };
+
+            object plane = ResolvePlane(context, doc, spec.PlaneRef, namedPlanes);
+            bool visible = spec.Visible ?? false;
+            var specWarnings = new List<string>();
+            object profile = CreateProfileForFeature(context, doc, plane, spec, visible, specWarnings);
+
+            // 曲面拉伸方向:缺省 igRight=2(同 extrude),允许自愈到 igLeft=1
+            int side = spec.Side ?? 2;
+
+            object constructions = Get(doc, "Constructions");
+            object exSurfs = Get(constructions, "ExtrudedSurfaces");
+            try
+            {
+                Array profArr = new object[] { profile };
+                object feat = ((SolidEdgePart.ExtrudedSurfaces)exSurfs).AddFinite(
+                    1, ref profArr,
+                    (SolidEdgePart.FeaturePropertyConstants)side,
+                    spec.Depth.Value);
+
+                // P3.4 缓存曲面体面:AddFinite 刚加的构造体即 Constructions 最后一个成员(实测 Constructions.Item(n).Name 为空、
+                // 与 AddFinite 返回对象 ReferenceEquals=False——不同 RCW,按名/引用匹配不可靠,创建时缓存最稳)。
+                // 缓存后 ThickenOp 的 faceOf "@别名" 直接命中,不再走 GetSurfaceFaces 匹配。
+                if (!string.IsNullOrEmpty(name))
+                {
+                    try
+                    {
+                        int cCount = Count(constructions);
+                        if (cCount >= 1)
+                        {
+                            object cons = Get(constructions, "Item", cCount);
+                            object body = Get(cons, "Body");
+                            if (body != null)
+                            {
+                                object faces = Get(body, "Faces", 1);   // igQueryAll=1
+                                int n = Count(faces);
+                                var list = new List<object>();
+                                for (int f = 1; f <= n; f++) list.Add(Get(faces, "Item", f));
+                                if (list.Count > 0) surfaceFaces[name] = list;
+                            }
+                        }
+                    }
+                    catch { /* 缓存失败不阻断:ThickenOp 走 GetSurfaceFaces 兜底 */ }
+                }
+
+                // 产物 kind 用 ExtrudedSurface,登记到 namedFeatures 后供 thicken 的 faceOf 引用
+                return FeatureResult("extrude_surface", name, feat, context, profile, "ExtrudedSurface", specWarnings,
+                    new { plane = spec.PlaneRef, depth = spec.Depth.Value, side = side,
+                          faceCount = surfaceFaces.TryGetValue(name ?? "", out var fl) ? fl.Count : 0 });
+            }
+            catch (Exception ex)
+            {
+                DiscardCutCandidate(profile, null);
+                return new { op = "extrude_surface", name = name, status = "error",
+                    message = "ExtrudedSurfaces.AddFinite 失败:" + DescribeException(ex) };
+            }
+        }
+
+        /// <summary>
+        /// thicken 曲面加厚:把 extrude_surface 产出的曲面加厚成实体。
+        /// faces 必须取自 Constructions.Item(n).Body.Faces(igQueryAll)——surface 自身 .Faces 抛异常(对照表坑)。
+        /// Thickens.Add(Side, offsetDistance, nFaces, ref Faces);Side: igOutside=5(向外加厚,默认) / igInside=4。
+        /// </summary>
+        private static object ThickenOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name,
+            Dictionary<string, object> namedFeatures, Dictionary<string, List<object>> surfaceFaces)
+        {
+            if (!spec.Thickness.HasValue || spec.Thickness.Value <= 0)
+                return new { op = "thicken", name = name, status = "error",
+                    message = "thicken 必须提供 thickness(米,且 > 0)。" };
+            if (!spec.HasFaceRef)
+                return new { op = "thicken", name = name, status = "error",
+                    message = "thicken 需通过 faceOf 指向 extrude_surface 产出的曲面特征(如 \"faceOf\":\"@s1\")。" };
+
+            object featObj;
+            try { featObj = ResolveFeatureObject(context, spec.FaceRef.FeatureName, namedFeatures); }
+            catch (Exception ex)
+            {
+                return new { op = "thicken", name = name, status = "error", message = "面引用解析失败:" + ex.Message };
+            }
+
+            // 取曲面体的所有面:优先用 ExtrudeSurfaceOp 创建时缓存的体面(按 @别名 名精确命中);
+            // 兜底走 GetSurfaceFaces 扫描 Constructions(surface 自身 .Faces 会抛,须走 Body.Faces(igQueryAll=1))
+            List<object> surfFaces = null;
+            if (!string.IsNullOrEmpty(spec.FaceRef.FeatureName)
+                && surfaceFaces.TryGetValue(spec.FaceRef.FeatureName, out var cached)
+                && cached != null && cached.Count > 0)
+            {
+                surfFaces = cached;
+            }
+            else
+            {
+                try { surfFaces = GetSurfaceFaces(featObj, doc); }
+                catch (Exception ex)
+                {
+                    return new { op = "thicken", name = name, status = "error", unsupported = true,
+                        message = "读取曲面体面失败:" + ex.Message +
+                                  "(对照表坑:surface 自身 .Faces 抛异常,须走 Constructions.Item.Body.Faces;本通道也失败则入拒绝清单)",
+                        alternatives = new[] { "客户端用 se_read_geometry 读出曲面 Face.ID 后,改用其它 op 或 se_invoke_member" },
+                        fix = new { action = "use_alternative" } };
+                }
+            }
+            if (surfFaces == null || surfFaces.Count == 0)
+                return new { op = "thicken", name = name, status = "error",
+                    message = "曲面特征没有可加厚的面(faceOf 指向的可能不是 extrude_surface 产物)。" };
+
+            // faceNormal 可选:在曲面面里按法向过滤(非平面面 TryGetFaceNormal 返回 null,跳过)
+            if (spec.FaceRef.Normal != null)
+            {
+                double nx = spec.FaceRef.Normal[0], ny = spec.FaceRef.Normal[1], nz = spec.FaceRef.Normal[2];
+                double mag = System.Math.Sqrt(nx * nx + ny * ny + nz * nz);
+                if (mag > 1e-12) { nx /= mag; ny /= mag; nz /= mag; }
+                var filtered = new List<object>();
+                foreach (var f in surfFaces)
+                {
+                    double[] nrm = TryGetFaceNormal(f);
+                    if (nrm == null) continue;
+                    if (nrm[0] * nx + nrm[1] * ny + nrm[2] * nz > 1 - 1e-6) filtered.Add(f);
+                }
+                if (filtered.Count > 0) surfFaces = filtered;
+            }
+
+            object models = Get(doc, "Models");
+            if (Count(models) == 0)
+                return new { op = "thicken", name = name, status = "error", message = "thicken 需在已有 Model 上执行(文档应有 Models)。" };
+            object model = Get(models, "Item", 1);
+
+            int side = spec.Side ?? 5;   // 默认 igOutside=5(向外加厚)
+            try
+            {
+                Array facesArr = surfFaces.ToArray();
+                object feat = ((SolidEdgePart.Model)model).Thickens.Add(
+                    (SolidEdgePart.FeaturePropertyConstants)side,
+                    spec.Thickness.Value, surfFaces.Count, ref facesArr);
+                return FeatureResult("thicken", name, feat, context, null, "Thicken", null,
+                    new { faceOf = spec.FaceRef.FeatureName, thickness = spec.Thickness.Value, side = side, faceCount = surfFaces.Count });
+            }
+            catch (Exception ex)
+            {
+                // 2026-09-23 P3 批2 真机:in-process Thickens.Add 全组合 E_INVALIDARG(0-based/1-based 数组、Side 4/5/97/98/160、面数 1/4/8)
+                // 按 pattern 惯例诚实拒绝:SE 2022 强类型 interop 下 Thickens.Add 不可达,勿再烧调用方重试
+                return new { op = "thicken", name = name, status = "error", unsupported = true,
+                    message = "Thickens.Add 失败:" + DescribeException(ex) +
+                              "(SE 2022 实测全组合 E_INVALIDARG:数组 0-based/1-based、Side igInside=4/igOutside=5/97/98/160、面数 1/4/8 均失败;in-process 与脚本子进程结论一致,判定该 COM 通道不可达)",
+                    alternatives = new[] { "用 extrude_surface + 后续 extrude/cut 手工造壁(薄板另走 rib/web_network)", "用 se_invoke_member 走晚绑定再探(低概率)", "改用同步建模加厚(见 P4 face_edit)" },
+                    fix = new { action = "use_alternative" } };
+            }
+        }
+
+        /// <summary>
+        /// delete_face 删面:删除 blend(圆角)面并愈合。需 confirm=true(破坏性操作)。
+        /// 走 DeleteBlends.Add(BlendsToDelete)——专门删 blend/round 面;若目标非 blend 面则失败入拒绝清单。
+        /// </summary>
+        private static object DeleteFaceOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name,
+            Dictionary<string, object> namedFeatures)
+        {
+            if (spec.Confirm != true)
+                return new { op = "delete_face", name = name, status = "error",
+                    message = "delete_face 是破坏性操作,必须显式传 \"confirm\":true 才会执行。" };
+            if (!spec.HasFaceRef)
+                return new { op = "delete_face", name = name, status = "error",
+                    message = "delete_face 需通过 faceOf/faceIndex 指定要删除的面。" };
+
+            List<string> warnings;
+            object targetFace;
+            try { targetFace = ResolveFaceRef(context, doc, spec.FaceRef, namedFeatures, out warnings); }
+            catch (Exception ex)
+            {
+                return new { op = "delete_face", name = name, status = "error", message = "面引用解析失败:" + ex.Message };
+            }
+
+            object models = Get(doc, "Models");
+            if (Count(models) == 0)
+                return new { op = "delete_face", name = name, status = "error", message = "delete_face 前必须先有实体。" };
+            object model = Get(models, "Item", 1);
+
+            // 先试 DeleteBlends(删 blend/round 面,自动愈合);失败再试 DeleteFaces(删任意面)
+            try
+            {
+                object feat = ((SolidEdgePart.Model)model).DeleteBlends.Add(targetFace);
+                return FeatureResult("delete_face", name, feat, context, null, "DeleteBlend", warnings,
+                    new { faceOf = spec.FaceRef.FeatureName, faceIndex = spec.FaceRef.Index, kind = "blend" });
+            }
+            catch (Exception blendEx)
+            {
+                // 非 blend 面:试 DeleteFaces.Add(删任意面,带愈合)
+                try
+                {
+                    object feat = ((SolidEdgePart.Model)model).DeleteFaces.Add(targetFace);
+                    return FeatureResult("delete_face", name, feat, context, null, "DeleteFace", warnings,
+                        new { faceOf = spec.FaceRef.FeatureName, faceIndex = spec.FaceRef.Index, kind = "general",
+                              note = "目标不是 blend 面,改走 DeleteFaces 通用删面通道(DeleteBlends 失败:" + blendEx.Message + ")" });
+                }
+                catch (Exception ex)
+                {
+                    return new { op = "delete_face", name = name, status = "error", unsupported = true,
+                        message = "DeleteBlends 与 DeleteFaces 都失败:" + DescribeException(ex),
+                        alternatives = new[] { "用 cut 切掉目标面所在区域", "用 se_invoke_member 走晚绑定试其它删除形态" },
+                        fix = new { action = "use_alternative" } };
+                }
+            }
+        }
+
+        /// <summary>
+        /// 解析面引用里的特征对象(仅 @别名/obj-K 存在性反查,不做面选择)。
+        /// 供 thicken(自己从曲面体取面)与 split(target) 复用。
+        /// </summary>
+        private static object ResolveFeatureObject(SolidEdgeContext context, string fof,
+            Dictionary<string, object> namedFeatures)
+        {
+            if (string.IsNullOrWhiteSpace(fof))
+                throw new ArgumentException("faceOf/target 必须是非空字符串(@别名 或 obj-K 句柄)");
+            if (fof.StartsWith("@", StringComparison.Ordinal))
+            {
+                string key = fof.Substring(1);
+                if (!namedFeatures.TryGetValue(key, out var featObj))
+                    throw new ArgumentException("未找到本批内命名特征 \"@" + key + "\"(需先给前面的特征带 name 创建)");
+                return featObj;
+            }
+            if (fof.StartsWith("obj-", StringComparison.OrdinalIgnoreCase))
+            {
+                var h = context.GetHandle(fof);
+                if (h == null || h.ComObject == null)
+                    throw new ArgumentException("句柄表里找不到特征对象 " + fof);
+                return h.ComObject;
+            }
+            throw new ArgumentException("faceOf/target 必须以 @ 或 obj- 开头(当前 \"" + fof + "\")");
+        }
+
+        /// <summary>
+        /// 取曲面特征的体所有面。★ 不走 featObj.Body——特征对象(ExtrudedSurface 等)没有 Body 属性
+        /// (实测 GetIDsOfNames 失败 0x80020006,与 ExtrudedProtrusion 同款);且 surface 自身 .Faces 抛异常。
+        /// 唯一可靠路径:扫 doc.Constructions 取 Constructions.Item(n).Body.Faces(igQueryAll=1)。
+        /// ★ 匹配策略:Constructions.Item(n).Name 实测为空、且与 AddFinite 返回对象 ReferenceEquals=False(不同 RCW),
+        /// 无法按名/引用匹配 → 兜底启发式:从最新成员倒序取第一个有 Body 面的构造体(批内单曲面场景即命中)。
+        /// 首选通道是 ExtrudeSurfaceOp 创建时缓存(ThickenOp 按 @别名 精确取),本方法仅兜底 obj-K/未缓存场景。
+        /// </summary>
+        private static List<object> GetSurfaceFaces(object featObj, object doc)
+        {
+            var result = new List<object>();
+            object constructions = Get(doc, "Constructions");
+            int cCount = Count(constructions);
+            for (int i = cCount; i >= 1; i--)
+            {
+                object item = Get(constructions, "Item", i);
+                try
+                {
+                    object body = Get(item, "Body");
+                    if (body == null) continue;
+                    object faces = Get(body, "Faces", 1);   // igQueryAll=1
+                    int n = Count(faces);
+                    if (n == 0) continue;
+                    for (int f = 1; f <= n; f++) result.Add(Get(faces, "Item", f));
+                    return result;
+                }
+                catch { }
+            }
+            return result;
+        }
+
         /// <summary>按名字找特征:先查 obj-K 句柄,再扫常用特征集合的 Name(学对方 DesignEdgebarFeatures 遍历思路)。</summary>
         private static object FindFeatureByName(SolidEdgeContext context, object doc, string of, out object model)
         {
@@ -1131,6 +1928,293 @@ namespace SolidEdge.Spy.McpServer.Tools
 
         /// <summary>
         /// 建旋转轮廓:ProfileSets.Add → Profiles.Add(plane) → 截面闭环(逐线 + 端点重合约束)
+        // ============================ P2(2026-09-23):多轮廓 loft / sweep / helix ============================
+        //
+        // 三个 op 的共用约定(依据 SE2022 SDK 离线文档 + 对照表情报):
+        //  - 均要求模型里已有基体特征。首特征通道(Models.AddLoftedProtrusion 18 参 /
+        //    Models.AddSweptProtrusion / Models.AddFiniteBaseHelix 后者每 Part 仅许一次)P2 统一不开放,
+        //    提示调用方先 extrude;
+        //  - mode:"cut" 走对应 Cutouts 集合(与 revolve 的双通道同构);
+        //  - 截面锚点 Origins:显式 origin > 周期截面(圆)传 0(SDK 文档明示)> 轮廓首点。
+        //    非周期截面的锚点必须是轮廓上真实一点,硬编码 (0,0) 会静默无几何;
+        //  - CrossSectionTypes 恒 igProfileBasedCrossSection(48):我们的截面全是草图 Profile,不是实体边。
+
+        /// <summary>loft:放样凸台(默认)/ 放样除料(mode:"cut")。profiles ≥2 个截面,各自建草图后 AddSimple。</summary>
+        private static object LoftOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name,
+            Dictionary<string, object> namedPlanes)
+        {
+            bool isCut = string.Equals(spec.Mode, "cut", StringComparison.OrdinalIgnoreCase);
+
+            object models = Get(doc, "Models");
+            if (Count(models) == 0)
+                return new
+                {
+                    op = "loft", name = name, status = "error",
+                    message = "loft 需先有基体特征(首特征放样走 Models.AddLoftedProtrusion 18 参通道,P2 未开放)——本批或前一批先 extrude。",
+                    diagnosis = "放样截面叠在已有实体上才有料可长/可切。"
+                };
+
+            object model = Get(models, "Item", 1);
+            var specWarnings = new List<string>();
+            var profiles = new List<object>();
+
+            try
+            {
+                foreach (var entry in spec.Profiles)
+                {
+                    object plane = ResolvePlane(context, doc, entry.PlaneRef, namedPlanes);
+                    profiles.Add(CreateProfileForFeature(context, doc, plane, entry, spec.Visible ?? false, specWarnings));
+                }
+
+                int n = profiles.Count;
+                var sections = new object[n];
+                var types = new object[n];
+                var origins = new object[n];
+                for (int i = 0; i < n; i++)
+                {
+                    sections[i] = profiles[i];
+                    types[i] = 48;   // igProfileBasedCrossSection
+                    origins[i] = SectionOrigin(spec.Profiles[i]);
+                }
+
+                object coll = Get(model, isCut ? "LoftedCutouts" : "LoftedProtrusions");
+                // MaterialSide=igLeft(1)、Start/EndTangentType=igNone(44):SDK VB 示例取值
+                object featObj = Call(coll, "AddSimple",
+                    new object[] { n, sections, types, origins, 1, 44, 44 });
+
+                return FeatureResult("loft", name, featObj, context, profiles.Count > 0 ? profiles[0] : null,
+                    isCut ? "LoftedCutout" : "LoftedProtrusion", specWarnings,
+                    new { mode = isCut ? "cut" : "protrusion", sections = n },
+                    profiles.Count > 1 ? profiles.GetRange(1, profiles.Count - 1) : null);
+            }
+            catch
+            {
+                DiscardProfiles(profiles);   // AddSimple 半路抛:草图一定留着,全部清理再让上层报错
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// sweep:扫掠凸台(默认)/ 扫掠除料(mode:"cut")。profiles 首项=路径(polygon 按开放链解释),
+        /// 其余=截面。SDK 的 15 参 Add:路径在 TraceCurves、截面在 CrossSections【分开传】,
+        /// SegmentMaps=0、两端 Extent=igNone(44)/0/null、MaterialSide=igLeft(1)。
+        /// </summary>
+        private static object SweepOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name,
+            Dictionary<string, object> namedPlanes)
+        {
+            bool isCut = string.Equals(spec.Mode, "cut", StringComparison.OrdinalIgnoreCase);
+
+            object models = Get(doc, "Models");
+            if (Count(models) == 0)
+                return new
+                {
+                    op = "sweep", name = name, status = "error",
+                    message = "sweep 需先有基体特征(首特征扫掠走 Models.AddSweptProtrusion 通道,P2 未开放)——本批或前一批先 extrude。",
+                    diagnosis = "扫掠截面沿路径叠在已有实体上才有料可长/可切。"
+                };
+
+            object model = Get(models, "Item", 1);
+            var specWarnings = new List<string>();
+            var profiles = new List<object>();   // [0]=路径,其余=截面
+
+            try
+            {
+                bool visible = spec.Visible ?? false;
+                var pathSpec = spec.Profiles[0];
+                object pathPlane = ResolvePlane(context, doc, pathSpec.PlaneRef, namedPlanes);
+                if (pathSpec.OpenChain != null)
+                    profiles.Add(CreateProfileOpenChain(doc, pathPlane, pathSpec.OpenChain, visible));
+                else
+                    profiles.Add(CreateProfileForFeature(context, doc, pathPlane, pathSpec, visible, specWarnings));
+
+                for (int i = 1; i < spec.Profiles.Count; i++)
+                {
+                    var entry = spec.Profiles[i];
+                    object plane = ResolvePlane(context, doc, entry.PlaneRef, namedPlanes);
+                    profiles.Add(CreateProfileForFeature(context, doc, plane, entry, visible, specWarnings));
+                }
+
+                int nSec = profiles.Count - 1;
+                var trace = new object[] { profiles[0] };
+                var traceTypes = new object[] { 48 };
+                var sections = new object[nSec];
+                var types = new object[nSec];
+                var origins = new object[nSec];
+                for (int i = 0; i < nSec; i++)
+                {
+                    sections[i] = profiles[i + 1];
+                    types[i] = 48;
+                    origins[i] = SectionOrigin(spec.Profiles[i + 1]);
+                }
+
+                // ★ Add 含 ByRef SAFEARRAY 参数(CrossSections 等):IDispatch 晚绑定会错位
+                //   (DISP_E 0x8002000F,puArgErr=3 指向第 4 参)——必须走强类型。签名(15 参):
+                //   Add(NumTraceCurves, TraceCurves, TraceCurveTypes, NumSections, CrossSections,
+                //       CrossSectionTypes, SectionOrigins, SegmentMaps, MaterialSide(FPC),
+                //       StartExtentType(FPC), StartExtentValue, StartExtentRef,
+                //       EndExtentType(FPC), EndExtentValue, EndExtentRef)
+                var m = (SolidEdgePart.Model)model;
+                Array traceArr = new object[] { profiles[0] };
+                Array traceTypeArr = new object[] { 48 };
+                Array sectionArr = (Array)sections;   // object[] → Array,ByRef SAFEARRAY 编组
+                Array sectionTypeArr = (Array)types;
+                Array originArr = (Array)origins;
+                object featObj = isCut
+                    ? m.SweptCutouts.Add(1, traceArr, traceTypeArr, nSec, sectionArr, sectionTypeArr, originArr, 0,
+                            SolidEdgePart.FeaturePropertyConstants.igLeft,
+                            SolidEdgePart.FeaturePropertyConstants.igNone, 0.0, null,
+                            SolidEdgePart.FeaturePropertyConstants.igNone, 0.0, null)
+                    : m.SweptProtrusions.Add(1, traceArr, traceTypeArr, nSec, sectionArr, sectionTypeArr, originArr, 0,
+                            SolidEdgePart.FeaturePropertyConstants.igLeft,
+                            SolidEdgePart.FeaturePropertyConstants.igNone, 0.0, null,
+                            SolidEdgePart.FeaturePropertyConstants.igNone, 0.0, null);
+
+                return FeatureResult("sweep", name, featObj, context, profiles.Count > 0 ? profiles[0] : null,
+                    isCut ? "SweptCutout" : "SweptProtrusion", specWarnings,
+                    new { mode = isCut ? "cut" : "protrusion", path = "profiles[0]", sections = nSec },
+                    profiles.Count > 1 ? profiles.GetRange(1, profiles.Count - 1) : null);
+            }
+            catch
+            {
+                DiscardProfiles(profiles);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// helix:螺旋凸台(默认)/ 螺旋除料(mode:"cut")。与 revolve 同构(plane + 单闭合截面 + axis),
+        /// 另加 pitch/height/revolutions 三给二——这里把第三个补全(height = pitch × turns)后三参一致同传,
+        /// 规避 SDK"三种范围定义"取哪两个的歧义。
+        /// ★ AddFinite 的 CrossSectionArray 是 ByRef SAFEARRAY:与首特征 extrude 同类的 PIA 陷阱
+        ///   (IDispatch 晚绑定在冷启动/新文档下 DISP_E_TYPEMISMATCH),必须走强类型调用。
+        /// </summary>
+        private static object HelixOp(SolidEdgeContext context, object doc, FeatureSpec spec, string name,
+            Dictionary<string, object> namedPlanes)
+        {
+            bool isCut = string.Equals(spec.Mode, "cut", StringComparison.OrdinalIgnoreCase);
+
+            object models = Get(doc, "Models");
+            if (Count(models) == 0)
+                return new
+                {
+                    op = "helix", name = name, status = "error",
+                    message = "helix 需先有基体特征(首特征螺旋走 Models.AddFiniteBaseHelix 且每 Part 仅许一次,P2 未开放)——本批或前一批先 extrude。",
+                    diagnosis = "先 extrude 一个基体,螺旋特征叠在其上。"
+                };
+
+            object model = Get(models, "Item", 1);
+            var specWarnings = new List<string>();
+
+            object plane = ResolvePlane(context, doc, spec.PlaneRef, namedPlanes);
+            // circle 截面是自然闭合的真圆曲线:CreateProfileRevolve 只画直线环(Lines2d),
+            // 对 circle 会生成空剖面 → AddFinite E_FAIL。圆走专用"圆+旋转轴"路径(同 revolve 的轴语义)。
+            object[] pair = spec.HasCircle
+                ? CreateProfileRevolveCircle(doc, plane, spec.CircleX, spec.CircleY, spec.CircleR, spec, spec.Visible ?? false)
+                : CreateProfileRevolve(context, doc, plane, spec, spec.Visible ?? false, specWarnings);
+            object profile = pair[0];
+
+            // 三给二 → 补全第三个(三者保持一致,SE 取任意两个都无歧义)
+            double pitch = spec.Pitch ?? 0, height = spec.Height ?? 0, turns = spec.Revolutions ?? 0;
+            if (!spec.Pitch.HasValue) pitch = height / turns;
+            else if (!spec.Height.HasValue) height = pitch * turns;
+            else if (!spec.Revolutions.HasValue) turns = height / pitch;
+
+            try
+            {
+                Array csArr = new object[] { profile };
+                object featObj;
+                if (isCut)
+                {
+                    featObj = ((SolidEdgePart.Model)model).HelixCutouts.AddFinite(
+                        (SolidEdgePart.RefAxis)pair[1],
+                        SolidEdgePart.FeaturePropertyConstants.igStart, 1, ref csArr,
+                        SolidEdgePart.FeaturePropertyConstants.igRight,
+                        height, pitch, turns,
+                        SolidEdgePart.FeaturePropertyConstants.igRight);
+                }
+                else
+                {
+                    featObj = ((SolidEdgePart.Model)model).HelixProtrusions.AddFinite(
+                        (SolidEdgePart.RefAxis)pair[1],
+                        SolidEdgePart.FeaturePropertyConstants.igStart, 1, ref csArr,
+                        SolidEdgePart.FeaturePropertyConstants.igRight,
+                        height, pitch, turns,
+                        SolidEdgePart.FeaturePropertyConstants.igRight);
+                }
+
+                return FeatureResult("helix", name, featObj, context, profile, null, specWarnings,
+                    new { mode = isCut ? "cut" : "protrusion", pitch = pitch, height = height, revolutions = turns });
+            }
+            catch
+            {
+                DiscardProfiles(new List<object> { profile });
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// 截面锚点(Origins 数组单项):显式 origin &gt; 周期截面(圆)传 0(SDK 文档明示)&gt; 轮廓首点。
+        /// 非周期截面的锚点必须是轮廓上真实一点——硬编码 (0,0) 会静默无几何。
+        /// </summary>
+        private static object SectionOrigin(FeatureSpec entry)
+        {
+            if (entry.Origin != null && entry.Origin.Length >= 2)
+                return new double[] { entry.Origin[0], entry.Origin[1] };
+
+            if (entry.HasCircle) return 0;   // 周期截面:SDK 明示可传 0
+
+            if (entry.HasSlot)
+            {
+                // 腰孔左端点(轮廓上真实一点):中心 - 长轴方向 × 半长
+                double half = entry.SlotLength / 2.0;
+                return new double[] { entry.SlotX - Math.Cos(entry.SlotAngle) * half,
+                                      entry.SlotY - Math.Sin(entry.SlotAngle) * half };
+            }
+
+            if (entry.Loops.Count > 0 && entry.Loops[0].Length > 0)
+                return new double[] { entry.Loops[0][0][0], entry.Loops[0][0][1] };
+
+            return 0;
+        }
+
+        /// <summary>
+        /// 建开放链轮廓(sweep 路径专用):n 点画 n-1 条线,相邻线端点重合约束;
+        /// 【不】闭合、不加末点-首点约束——路径是"线",不是"面"(Line2d 索引:0=起点,1=终点)。
+        /// </summary>
+        private static object CreateProfileOpenChain(object doc, object plane, double[][] pts, bool visible)
+        {
+            object profileSets = Get(doc, "ProfileSets");
+            object profileSet = Call(profileSets, "Add", null);
+            object profiles = Get(profileSet, "Profiles");
+            object profile = Call(profiles, "Add", new object[] { plane });
+
+            object lines = Get(profile, "Lines2d");
+            object relations = Get(profile, "Relations2d");
+
+            var lineObjs = new object[pts.Length - 1];
+            for (int i = 0; i + 1 < pts.Length; i++)
+                lineObjs[i] = Call(lines, "AddBy2Points",
+                    new object[] { pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1] });
+
+            for (int i = 0; i + 1 < lineObjs.Length; i++)
+                Call(relations, "AddKeypoint", new object[] { lineObjs[i], 1, lineObjs[i + 1], 0 });
+
+            Call(profile, "End", new object[] { 0 });
+            if (!visible) SetVisible(profile, false);
+            return profile;
+        }
+
+        /// <summary>批量清理草图(多轮廓 op 失败回滚用):删每个 profile 所属的 ProfileSet。</summary>
+        private static void DiscardProfiles(List<object> profiles)
+        {
+            if (profiles == null) return;
+            foreach (var p in profiles)
+            {
+                object ps = TryGetProfileSet(p);
+                if (ps != null) TryDelete(ps);
+            }
+        }
+
         /// → 单独画旋转轴(不进闭环)→ SetAxisOfRevolution(必须在 End 之前)→ End(0)→ 隐藏草图。
         /// 返回 [Profile, RefAxis]:RefAxis 要原样交给 AddFinite。
         /// </summary>
@@ -1294,7 +2378,7 @@ namespace SolidEdge.Spy.McpServer.Tools
         /// </summary>
         private static object FeatureResult(string op, string name, object featObj, SolidEdgeContext context,
             object profile = null, string kindOverride = null, List<string> specWarnings = null,
-            object resolved = null)
+            object resolved = null, List<object> extraProfiles = null)
         {
             string featureName = SafeString(Get(featObj, "Name"));
             long? status = SafeLong(Get(featObj, "Status"));
@@ -1311,8 +2395,18 @@ namespace SolidEdge.Spy.McpServer.Tools
                 // 在文档里留下一堆草图垃圾(还会显示在图形区)。
                 bool sketchCleaned = profileSet != null && TryDelete(profileSet);
 
+                // P2 多轮廓(loft/sweep):其余截面的草图一并清理,回滚不留垃圾。
+                if (extraProfiles != null)
+                {
+                    foreach (var ep in extraProfiles)
+                    {
+                        object eps = TryGetProfileSet(ep);
+                        if (eps != null) TryDelete(eps);
+                    }
+                }
+
                 string reason = status.Value == StatusZombie ? "几何未生成(僵尸特征)" : "特征状态异常";
-                string diagnosis = (op == "cut" || kindOverride == "RevolvedCutout")
+                string diagnosis = (op == "cut" || (kindOverride != null && kindOverride.Contains("Cutout")))
                     ? "除料没切到实体:检查 plane 是否选对、side 方向是否朝实体内部、草图是否落在毛坯范围内。"
                     : "草图没长出实体:检查轮廓是否闭合、是否落在已有实体上、side/depth 方向是否正确。";
 
@@ -1502,6 +2596,36 @@ namespace SolidEdge.Spy.McpServer.Tools
 
             warnings.Add("shape=" + shape + " 走不到约束/标注应用路径(仅 rect/polygon/loops 直线环支持)," +
                 "已忽略 " + string.Join("、", names) + "——该轮廓不会被尺寸驱动,变量也不会进变量表。");
+        }
+
+        /// <summary>
+        /// 建【真圆】截面 + 独立旋转轴(revolve/helix 专用),返回 [Profile, RefAxis]。
+        /// 与 CreateProfileRevolve 同构,唯一区别是截面用 Circles2d.AddByCenterRadius(真圆)
+        /// 而非 Lines2d 直线环——CreateProfileRevolve 只画直线环,对 circle 声明生成的截面为空
+        /// (Loops 空),AddFinite 直接 E_FAIL。圆是天然闭合曲线,无需端点重合约束。
+        /// 轴与 CreateProfileRevolve 相同:独立构造线,End 之前 SetAxisOfRevolution,RefAxis 原样交给 AddFinite。
+        /// </summary>
+        private static object[] CreateProfileRevolveCircle(object doc, object plane, double cx, double cy, double r, FeatureSpec spec, bool visible)
+        {
+            object profileSets = Get(doc, "ProfileSets");
+            object profileSet = Call(profileSets, "Add", null);
+            object profiles = Get(profileSet, "Profiles");
+            object profile = Call(profiles, "Add", new object[] { plane });
+
+            // 1) 截面:真圆(单闭合环,天然闭合无约束需求)
+            object circles = Get(profile, "Circles2d");
+            Call(circles, "AddByCenterRadius", new object[] { cx, cy, r });
+
+            // 2) 旋转轴:独立构造线,不参与截面闭环约束(同 CreateProfileRevolve)
+            object lines = Get(profile, "Lines2d");
+            object axisLine = Call(lines, "AddBy2Points",
+                new object[] { spec.AxisP1[0], spec.AxisP1[1], spec.AxisP2[0], spec.AxisP2[1] });
+            object refAxis = Call(profile, "SetAxisOfRevolution", new object[] { axisLine });
+
+            Call(profile, "End", new object[] { 0 });
+            if (!visible) SetVisible(profile, false);
+
+            return new object[] { profile, refAxis };
         }
 
         /// <summary>

@@ -52,13 +52,28 @@ namespace SolidEdge.Spy.McpServer.Tools
                 new ChamferRule(),            // E406 chamfer 缺 distance / <=0
                 new RibRule(),                // E407 rib 缺 thickness / 轮廓不是开放链形状
                 new PatternRule(),            // E408 pattern 缺 of/counts/spacing 非法 / W408 of 本批内找不到
+
+                // ---- 扩 op(2026-09-23 P1):hole ----
+                new HoleRule(),               // E409 hole 形状只接受圆 / mode 非法 / finite 缺 depth
+
+                // ---- 扩 op(2026-09-23 P2):loft / sweep / helix ----
+                new LoftRule(),               // E410 loft 多轮廓声明(profiles 数量/形状/plane)
+                new SweepRule(),              // E411 sweep path+截面声明
+                new HelixRule(),              // E412 helix 参数(pitch/height/revolutions 二给一)
+                // 2026-09-23 P3 面引用机制:draft / split / web_network / thicken / delete_face
+                new FeatureRefRule(),         // E204 faceOf 引用未定义/前向引用/解析失败
+                new DraftRule(),              // E413 draft angle/side(只认 4/5)
+                new SplitRule(),              // E414 split target(@别名/obj-K)
+                new WebNetworkRule(),         // E415 web_network thickness/depth > 0
+                new ThickenRule(),            // E416 thicken thickness > 0
+                new DeleteFaceRule()           // E417 delete_face confirm 必须 true
             };
         }
     }
 
     // ==================== 结构层 ====================
 
-    /// <summary>E101:op 必须是 plane / extrude / cut / revolve / fillet / chamfer / rib / pattern。</summary>
+    /// <summary>E101:op 必须是 plane / extrude / cut / revolve / fillet / chamfer / rib / pattern / hole / loft / sweep / helix。</summary>
     public sealed class OpRule : IFeatureRule
     {
         public string Code { get { return "E101"; } }
@@ -69,21 +84,24 @@ namespace SolidEdge.Spy.McpServer.Tools
         {
             var s = ctx.Current;
             if (s.OpLower == "plane" || s.OpLower == "extrude" || s.OpLower == "cut" || s.OpLower == "revolve" ||
-                s.OpLower == "fillet" || s.OpLower == "chamfer" || s.OpLower == "rib" || s.OpLower == "pattern")
+                s.OpLower == "fillet" || s.OpLower == "chamfer" || s.OpLower == "rib" || s.OpLower == "pattern" ||
+                s.OpLower == "hole" || s.OpLower == "loft" || s.OpLower == "sweep" || s.OpLower == "helix" ||
+                s.OpLower == "draft" || s.OpLower == "split" || s.OpLower == "web_network" ||
+                s.OpLower == "extrude_surface" || s.OpLower == "thicken" || s.OpLower == "delete_face")
                 yield break;
 
             yield return ctx.Error("E101", "op",
-                "未知 op \"" + s.Op + "\",仅支持 plane / extrude / cut / revolve / fillet / chamfer / rib / pattern。",
-                new { action = "set", field = "op", allowed = new[] { "plane", "extrude", "cut", "revolve", "fillet", "chamfer", "rib", "pattern" } });
+                "未知 op \"" + s.Op + "\",仅支持 plane / extrude / cut / revolve / fillet / chamfer / rib / pattern / hole / loft / sweep / helix / draft / split / web_network / extrude_surface / thicken / delete_face。",
+                new { action = "set", field = "op", allowed = new[] { "plane", "extrude", "cut", "revolve", "fillet", "chamfer", "rib", "pattern", "hole", "loft", "sweep", "helix", "draft", "split", "web_network", "extrude_surface", "thicken", "delete_face" } });
         }
     }
 
-    /// <summary>E102:extrude / cut / revolve 必须有可解析的草图形状(circle / circles / slot / rect / polygon / loops 六选一)。</summary>
+    /// <summary>E102:extrude / cut / revolve / helix 必须有可解析的草图形状(circle / circles / slot / rect / polygon / loops 六选一)。</summary>
     public sealed class RequiredShapeRule : IFeatureRule
     {
         public string Code { get { return "E102"; } }
         public Severity DefaultLevel { get { return Severity.Error; } }
-        public string[] AppliesTo { get { return new[] { "extrude", "cut", "revolve" }; } }
+        public string[] AppliesTo { get { return new[] { "extrude", "cut", "revolve", "helix", "extrude_surface", "web_network" }; } }
 
         public IEnumerable<Issue> Check(ValidationContext ctx)
         {
@@ -97,16 +115,16 @@ namespace SolidEdge.Spy.McpServer.Tools
     }
 
     /// <summary>
-    /// E403:revolve 必须有旋转轴 axis,且轴不能退化、角度必须合法。
+    /// E403:revolve / helix 必须有旋转轴 axis,且轴不能退化;revolve 的角度必须合法。
     ///
-    /// 旋转是唯一"多一个自由度"的 op:轮廓之外还得有轴,少了轴整个特征无从定义,
-    /// 所以是 error 而不是 warning。角度超过一整圈 AddFinite 也接受不了。
+    /// 旋转类是唯一"多一个自由度"的 op 族:轮廓之外还得有轴,少了轴整个特征无从定义,
+    /// 所以是 error 而不是 warning。角度超过一整圈 AddFinite 也接受不了(helix 无角度语义,跳过)。
     /// </summary>
     public sealed class RevolveAxisRule : IFeatureRule
     {
         public string Code { get { return "E403"; } }
         public Severity DefaultLevel { get { return Severity.Error; } }
-        public string[] AppliesTo { get { return new[] { "revolve" }; } }
+        public string[] AppliesTo { get { return new[] { "revolve", "helix" }; } }
 
         public IEnumerable<Issue> Check(ValidationContext ctx)
         {
@@ -119,7 +137,7 @@ namespace SolidEdge.Spy.McpServer.Tools
                 yield return ctx.Error("E403", "axis",
                     wrote
                         ? "旋转轴两点重合(退化成点),无法确定旋转方向。"
-                        : "revolve 缺少 axis(旋转轴两点)。",
+                        : s.OpLower + " 缺少 axis(旋转轴两点)。",
                     new
                     {
                         action = wrote ? "fix" : "provide",
@@ -129,6 +147,8 @@ namespace SolidEdge.Spy.McpServer.Tools
                     });
                 yield break;
             }
+
+            if (s.OpLower != "revolve") yield break;   // helix 无角度语义
 
             double angle = s.Degrees.HasValue
                 ? s.Degrees.Value * Math.PI / 180.0
@@ -498,7 +518,8 @@ namespace SolidEdge.Spy.McpServer.Tools
             string field = isPlaneOp ? "base" : "plane";
 
             if (!isPlaneOp && s.OpLower != "extrude" && s.OpLower != "cut" &&
-                s.OpLower != "rib" && s.OpLower != "pattern") yield break;
+                s.OpLower != "rib" && s.OpLower != "pattern" && s.OpLower != "helix" &&
+                s.OpLower != "draft" && s.OpLower != "web_network" && s.OpLower != "extrude_surface") yield break;
 
             if (string.IsNullOrWhiteSpace(ref_))
             {
@@ -739,23 +760,53 @@ namespace SolidEdge.Spy.McpServer.Tools
 
     // ==================== 语义层 ====================
 
-    /// <summary>E401:cut 之前必须已有 extrude(除料得有料可除)。</summary>
+    /// <summary>
+    /// E401:除料类特征之前必须已有增材特征(除料得有料可除)。
+    ///
+    /// 2026-09-23 P2 扩展:除料语义从 cut/hole 扩到全部 op 的 mode:"cut" 变体
+    /// (revolve/loft/sweep/helix 切割);增材判定同样扩到 rib 与四者的凸台形态。
+    /// </summary>
     public sealed class CutBeforeExtrudeRule : IFeatureRule
     {
         public string Code { get { return "E401"; } }
         public Severity DefaultLevel { get { return Severity.Error; } }
-        public string[] AppliesTo { get { return new[] { "cut" }; } }
+        public string[] AppliesTo { get { return new[] { "cut", "hole", "revolve", "loft", "sweep", "helix" }; } }
 
         public IEnumerable<Issue> Check(ValidationContext ctx)
         {
+            var s = ctx.Current;
+
+            // 除料语义:cut/hole 天然是;revolve/loft/sweep/helix 要 mode=="cut" 才算
+            bool cutLike = s.OpLower == "cut" || s.OpLower == "hole" ||
+                string.Equals(s.Mode, "cut", StringComparison.OrdinalIgnoreCase);
+            if (!cutLike) yield break;
+
             for (int i = 0; i < ctx.Index; i++)
             {
-                if (ctx.Specs[i].OpLower == "extrude") yield break;
+                if (CreatesMaterial(ctx.Specs[i])) yield break;
             }
 
             yield return ctx.Error("E401", "op",
-                "除料前必须先建实体(extrude)——当前特征之前没有任何 extrude。",
+                "除料前必须先建实体——当前特征之前没有任何增材特征(extrude/rib 或 revolve/loft/sweep/helix 凸台)。",
                 new { action = "insert_extrude_before", beforeFeature = ctx.Index });
+        }
+
+        /// <summary>该特征是否给模型加料:extrude/rib 恒是;四类旋转/多轮廓 op 取决于 mode 是否 "cut"。</summary>
+        private static bool CreatesMaterial(FeatureSpec p)
+        {
+            switch (p.OpLower)
+            {
+                case "extrude":
+                case "rib":
+                    return true;
+                case "revolve":
+                case "loft":
+                case "sweep":
+                case "helix":
+                    return !string.Equals(p.Mode, "cut", StringComparison.OrdinalIgnoreCase);
+                default:
+                    return false;
+            }
         }
     }
 
@@ -792,12 +843,12 @@ namespace SolidEdge.Spy.McpServer.Tools
     {
         public string Code { get { return "W402"; } }
         public Severity DefaultLevel { get { return Severity.Warning; } }
-        public string[] AppliesTo { get { return new[] { "extrude", "cut" }; } }
+        public string[] AppliesTo { get { return new[] { "extrude", "cut", "hole" }; } }
 
         public IEnumerable<Issue> Check(ValidationContext ctx)
         {
             var s = ctx.Current;
-            int side = s.Side ?? (s.OpLower == "cut" ? 1 : 2);
+            int side = s.Side ?? ((s.OpLower == "cut" || s.OpLower == "hole") ? 1 : 2);
 
             if (side < 1 || side > 3)
             {
@@ -821,15 +872,16 @@ namespace SolidEdge.Spy.McpServer.Tools
     }
 
     /// <summary>
-    /// W401:同一平面上出现两次及以上 cut 却没有合并成一个 loops —— **僵尸特征头号杀手**。
+    /// W401:同一平面上出现两次及以上 cut/hole 却没有合并成一个轮廓——**僵尸特征头号杀手**。
     /// 实测:同一模型第 2 个及以后的 AddThroughNext 必然 Status=1216476311(几何未生成),
-    /// 与 mode=next/all/finite 无关。多孔必须画进同一个 Profile 的多个闭合环,一次切完。
+    /// 与 mode=next/all/finite 无关。多孔必须画进同一个 Profile 的多个圆环(circles),一次切完。
+    /// hole 与 cut 共用除料管线,僵尸规律相同(2026-09-23 hole op 纳入)。
     /// </summary>
     public sealed class ConsecutiveCutRule : IFeatureRule
     {
         public string Code { get { return "W401"; } }
         public Severity DefaultLevel { get { return Severity.Warning; } }
-        public string[] AppliesTo { get { return new[] { "cut" }; } }
+        public string[] AppliesTo { get { return new[] { "cut", "hole" }; } }
 
         public IEnumerable<Issue> Check(ValidationContext ctx)
         {
@@ -839,19 +891,19 @@ namespace SolidEdge.Spy.McpServer.Tools
             for (int i = 0; i < ctx.Index; i++)
             {
                 var prev = ctx.Specs[i];
-                if (prev.OpLower != "cut") continue;
+                if (prev.OpLower != "cut" && prev.OpLower != "hole") continue;
                 if (!string.Equals(prev.PlaneRef, s.PlaneRef, StringComparison.OrdinalIgnoreCase)) continue;
 
                 yield return ctx.Warn("W401", "plane",
-                    "第 " + i + " 个特征已经在同一平面 \"" + s.PlaneRef + "\" 上除过料了。" +
-                    "同一模型上的第 2 次 AddThroughNext 必然生成僵尸特征(Status=1216476311)," +
-                    "请把这些孔合并进【同一个】cut 的 loops 里一次切完。",
+                    "第 " + i + " 个特征已经在同一平面 \"" + s.PlaneRef + "\" 上除过料/打过孔了。" +
+                    "同一平面上的第 2 次除料必然生成僵尸特征(Status=1216476311)," +
+                    "请把这些孔合并进【同一个】特征的 circles/loops 里一次切完。",
                     new
                     {
                         action = "merge_into_previous",
                         target = i,
-                        field = "loops",
-                        hint = "把本特征的环追加到目标特征的 loops 数组,再删掉本特征"
+                        field = "circles",
+                        hint = "把本特征的圆追加到目标特征的 circles 数组,再删掉本特征"
                     });
                 yield break;
             }
@@ -867,7 +919,7 @@ namespace SolidEdge.Spy.McpServer.Tools
     {
         public string Code { get { return "W403"; } }
         public Severity DefaultLevel { get { return Severity.Warning; } }
-        public string[] AppliesTo { get { return new[] { "cut" }; } }
+        public string[] AppliesTo { get { return new[] { "cut", "hole" }; } }
 
         public IEnumerable<Issue> Check(ValidationContext ctx)
         {
@@ -902,6 +954,465 @@ namespace SolidEdge.Spy.McpServer.Tools
                     "mode=finite 的 depth = " + GeoUtil.Fmt(depth) + ",切不到任何材料。",
                     new { action = "set", field = "depth", must = "> 0" });
             }
+        }
+    }
+
+    /// <summary>
+    /// E409:hole 的形状与模式校验(2026-09-23 P1)。
+    /// 形状只接受圆(circle/circles/center+diameter)——孔是圆的,异形孔诚实分流回 cut,不做万能入口;
+    /// mode 允许 through_all(默认,与 cut 的 next 默认不同)/all/next/finite,finite 必须给 depth。
+    /// </summary>
+    public sealed class HoleRule : IFeatureRule
+    {
+        public string Code { get { return "E409"; } }
+        public Severity DefaultLevel { get { return Severity.Error; } }
+        public string[] AppliesTo { get { return new[] { "hole" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+
+            if (s.Diameter.HasValue && s.Diameter.Value <= 0)
+            {
+                yield return ctx.Error("E409", "diameter",
+                    "diameter 必须 > 0(当前 " + GeoUtil.Fmt(s.Diameter.Value) + ")。",
+                    new { action = "set", field = "diameter", must = "> 0", unit = "m" });
+            }
+
+            bool round = s.HasCircle || s.HasCircles;
+            if (!round)
+            {
+                yield return ctx.Error("E409", "shape",
+                    string.IsNullOrEmpty(s.ShapeError)
+                        ? "hole 需要 circle/circles 或 center+diameter(孔是圆的);非圆异形孔请用 cut。"
+                        : s.ShapeError + "(hole 只接受圆孔;异形孔请用 cut)",
+                    new { action = "provide", field = "shape",
+                          oneOf = new[] { "circle", "circles", "center+diameter" } });
+                yield break;
+            }
+
+            // 模式:through_all(默认)/all/next/finite
+            string mode = (s.Mode ?? "").Trim().ToLowerInvariant();
+            if (mode == "through_all" || mode == "through") mode = "all";
+            if (string.IsNullOrEmpty(mode) || mode == "all" || mode == "next") yield break;   // 贯穿类,无额外要求
+
+            if (mode == "finite")
+            {
+                if (!s.Depth.HasValue)
+                    yield return ctx.Error("E409", "depth",
+                        "mode=\"finite\" 必须给 depth(米),否则会静默套用 0.2 米的默认值——盲孔深度别靠猜。",
+                        new { action = "provide", field = "depth", hint = "如 \"depth\":0.02 = 盲孔深 20mm" });
+            }
+            else
+            {
+                yield return ctx.Error("E409", "mode",
+                    "hole 的 mode \"" + s.Mode + "\" 不认识。允许 through_all(默认)/all/next/finite。",
+                    new { action = "set", field = "mode", allowed = new[] { "through_all", "all", "next", "finite" } });
+            }
+        }
+    }
+
+    // ==================== P2 多轮廓(2026-09-23):loft / sweep / helix ====================
+
+    /// <summary>
+    /// E410:loft 的多轮廓声明校验。
+    ///
+    /// loft 打破"单特征单轮廓"惯例:形状全部声明在 profiles 数组里(顶层不收形状)。
+    /// 核对:profiles 是数组且 ≥2 项;每项有 plane 且形状是【单闭合轮廓】——
+    /// circles 多环/开放链不能当放样截面(截面间的对应关系无定义)。
+    /// </summary>
+    public sealed class LoftRule : IFeatureRule
+    {
+        public string Code { get { return "E410"; } }
+        public Severity DefaultLevel { get { return Severity.Error; } }
+        public string[] AppliesTo { get { return new[] { "loft" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+
+            if (s.ProfilesError != null)
+            {
+                yield return ctx.Error("E410", "profiles", s.ProfilesError,
+                    new { action = "fix", field = "profiles", format = "[{\"plane\":...,形状字段,origin?},...]" });
+                yield break;
+            }
+
+            if (!s.HasProfiles)
+            {
+                yield return ctx.Error("E410", "profiles",
+                    "loft 的形状必须声明在 profiles 数组里(顶层不收形状字段)。例:profiles:[{\"plane\":\"RefPlane_1\",\"circle\":[0,0,0.02]},{\"plane\":\"@P1\",\"circle\":[0,0,0.01]}]。",
+                    new { action = "provide", field = "profiles", minItems = 2 });
+                yield break;
+            }
+
+            if (s.Profiles.Count < 2)
+            {
+                yield return ctx.Error("E410", "profiles",
+                    "loft 至少 2 个截面(当前 " + s.Profiles.Count + " 个)——一个截面放不出体。",
+                    new { action = "add_item", field = "profiles", minItems = 2 });
+                yield break;
+            }
+
+            foreach (var e in SectionIssues(ctx, s, 0, "E410"))
+                yield return e;
+        }
+
+        /// <summary>
+        /// 逐项核对截面:plane 必填、形状必须单闭合轮廓。loft 检查全部项,sweep 从第 2 项起检查
+        /// (首项是路径,规则不同)。放在 LoftRule 里只是"就近",sweep 也复用。
+        /// </summary>
+        internal static IEnumerable<Issue> SectionIssues(ValidationContext ctx, FeatureSpec s, int startIndex, string code)
+        {
+            for (int i = startIndex; i < s.Profiles.Count; i++)
+            {
+                var p = s.Profiles[i];
+                string at = "profiles[" + i + "]";
+
+                if (string.IsNullOrWhiteSpace(p.PlaneRef))
+                    yield return ctx.Error(code, at + ".plane",
+                        at + " 缺少 plane(每个截面各自声明所在平面,可用 @别名 / RefPlane_N / obj-K)。",
+                        new { action = "provide", field = at + ".plane" });
+
+                if (p.HasCircles)
+                    yield return ctx.Error(code, at + ".shape",
+                        at + " 用了 circles(多真圆)——放样/扫掠截面必须是【单个】闭合轮廓,多环没有对应关系。",
+                        new { action = "set", field = at + ".shape", oneOf = new[] { "circle", "slot", "rect", "polygon", "loops" } });
+                else if (p.ShapeError != null)
+                    yield return ctx.Error(code, at + ".shape",
+                        at + " " + p.ShapeError,
+                        new { action = "fix", field = at + ".shape" });
+                else if (p.OpenChain != null)
+                    yield return ctx.Error(code, at + ".shape",
+                        at + " 是开放链(polygon 只有 sweep 首项按开放路径解释)——截面必须闭合。",
+                        new { action = "fix", field = at + ".shape" });
+                else if (p.Loops.Count > 1)
+                    yield return ctx.Error(code, at + ".shape",
+                        at + " 有 " + p.Loops.Count + " 个环——截面必须是单闭合轮廓。",
+                        new { action = "fix", field = at + ".shape" });
+            }
+        }
+    }
+
+    /// <summary>
+    /// E411:sweep 的 path + 截面声明。
+    ///
+    /// 首项 = 路径:polygon 按【开放链】解释(≥2 点,不自动闭合,如折线/直线),
+    /// circle/rect/loops/slot 则是闭合路径(扫一整圈)。其余项 = 截面,须单闭合轮廓(同 loft)。
+    /// </summary>
+    public sealed class SweepRule : IFeatureRule
+    {
+        public string Code { get { return "E411"; } }
+        public Severity DefaultLevel { get { return Severity.Error; } }
+        public string[] AppliesTo { get { return new[] { "sweep" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+
+            if (s.ProfilesError != null)
+            {
+                yield return ctx.Error("E411", "profiles", s.ProfilesError,
+                    new { action = "fix", field = "profiles", format = "[{\"plane\":...,形状字段,origin?},...]" });
+                yield break;
+            }
+
+            if (!s.HasProfiles)
+            {
+                yield return ctx.Error("E411", "profiles",
+                    "sweep 的形状必须声明在 profiles 数组里:首项是路径(path),其余是截面。例:profiles:[{\"plane\":\"RefPlane_3\",\"polygon\":[[0,0],[0.05,0.05]]},{\"plane\":\"RefPlane_1\",\"circle\":[0,0,0.005]}]。",
+                    new { action = "provide", field = "profiles", minItems = 2 });
+                yield break;
+            }
+
+            if (s.Profiles.Count < 2)
+            {
+                yield return ctx.Error("E411", "profiles",
+                    "sweep 至少 2 项:1 条路径 + 1 个截面(当前 " + s.Profiles.Count + " 项)。",
+                    new { action = "add_item", field = "profiles", minItems = 2 });
+                yield break;
+            }
+
+            // 首项:路径(开放链或闭合轮廓均可,但不能多环)
+            var path = s.Profiles[0];
+            if (string.IsNullOrWhiteSpace(path.PlaneRef))
+                yield return ctx.Error("E411", "profiles[0].plane",
+                    "profiles[0](路径)缺少 plane。",
+                    new { action = "provide", field = "profiles[0].plane" });
+            else if (path.HasCircles)
+                yield return ctx.Error("E411", "profiles[0].shape",
+                    "profiles[0](路径)用了 circles——路径必须是单条链(polygon 开放链)或单个闭合轮廓。",
+                    new { action = "set", field = "profiles[0].shape", oneOf = new[] { "polygon", "circle", "slot", "rect", "loops" } });
+            else if (path.ShapeError != null && path.OpenChain == null)
+                yield return ctx.Error("E411", "profiles[0].shape",
+                    "profiles[0](路径)" + path.ShapeError + " 路径可用 polygon(开放链,≥2 点)或 circle/rect/loops(闭合)。",
+                    new { action = "fix", field = "profiles[0].shape" });
+
+            // 其余项:截面(单闭合轮廓),复用 loft 的逐项核对
+            foreach (var e in LoftRule.SectionIssues(ctx, s, 1, "E411"))
+                yield return e;
+        }
+    }
+
+    /// <summary>
+    /// E412:helix 的参数校验(pitch / height / revolutions 二给一)。
+    ///
+    /// helix 与 revolve 同构:顶层 plane + 单闭合截面 + axis(旋转轴,由 E403 核对),
+    /// 另需螺旋三要素中【至少两个】&gt; 0(第三个由 SE 推导)。circles 多环不能当螺旋截面。
+    /// </summary>
+    public sealed class HelixRule : IFeatureRule
+    {
+        public string Code { get { return "E412"; } }
+        public Severity DefaultLevel { get { return Severity.Error; } }
+        public string[] AppliesTo { get { return new[] { "helix" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+
+            if (s.HasCircles)
+                yield return ctx.Error("E412", "circles",
+                    "helix 截面必须单闭合轮廓(circle/rect/polygon/loops),circles 多环不支持。",
+                    new { action = "set", field = "shape", oneOf = new[] { "circle", "slot", "rect", "polygon", "loops" } });
+
+            if (s.Loops.Count > 1)
+                yield return ctx.Error("E412", "loops",
+                    "helix 截面有 " + s.Loops.Count + " 个环,必须单环。",
+                    new { action = "fix", field = "shape" });
+
+            if (s.Pitch.HasValue && !(s.Pitch.Value > 0))
+                yield return ctx.Error("E412", "pitch",
+                    "pitch(螺距)必须 > 0(当前 " + GeoUtil.Fmt(s.Pitch.Value) + ")。",
+                    new { action = "set", field = "pitch", must = "> 0", unit = "m" });
+
+            if (s.Height.HasValue && !(s.Height.Value > 0))
+                yield return ctx.Error("E412", "height",
+                    "height(螺旋高度)必须 > 0(当前 " + GeoUtil.Fmt(s.Height.Value) + ")。",
+                    new { action = "set", field = "height", must = "> 0", unit = "m" });
+
+            if (s.Revolutions.HasValue && !(s.Revolutions.Value > 0))
+                yield return ctx.Error("E412", "revolutions",
+                    "revolutions(圈数)必须 > 0(当前 " + GeoUtil.Fmt(s.Revolutions.Value) + ")。",
+                    new { action = "set", field = "revolutions", must = "> 0" });
+
+            int given = (s.Pitch.HasValue ? 1 : 0) + (s.Height.HasValue ? 1 : 0) + (s.Revolutions.HasValue ? 1 : 0);
+            if (given < 2)
+                yield return ctx.Error("E412", "pitch|height|revolutions",
+                    "helix 需给出 pitch(螺距,m)/ height(高度,m)/ revolutions(圈数)中【至少 2 个】,第三个由 SE 推导(当前只给了 " + given + " 个)。",
+                    new { action = "provide", fields = new[] { "pitch", "height", "revolutions" }, give = "至少 2/3" });
+        }
+    }
+
+    // ==================== P3 面引用机制(2026-09-23) ====================
+
+    /// <summary>
+    /// E204:faceOf 引用未定义 / 前向引用 / 解析失败。
+    /// 对照 PlaneRefRule(E203) 模板:faceOf 必须是 @别名(本批前面特征的 name) 或 obj-K 句柄。
+    /// obj-K 句柄不判(句柄表在 server 进程里,静态校验看不到)。
+    /// </summary>
+    public sealed class FeatureRefRule : IFeatureRule
+    {
+        public string Code { get { return "E204"; } }
+        public Severity DefaultLevel { get { return Severity.Error; } }
+        public string[] AppliesTo { get { return new[] { "*" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+
+            // 仅面引用类 op 才判:draft / thicken / delete_face
+            if (s.OpLower != "draft" && s.OpLower != "thicken" && s.OpLower != "delete_face")
+                yield break;
+
+            if (!s.HasFaceRef)
+            {
+                yield return ctx.Error("E204", "faceOf",
+                    "缺少 faceOf 面引用(需 {\"faceOf\":\"@别名\",\"faceNormal\":[0,0,1]} 或 {\"faceOf\":\"@别名\",\"faceIndex\":0})。",
+                    new { action = "provide", field = "faceOf" });
+                yield break;
+            }
+
+            // 解析失败的优先报
+            if (s.FaceRef != null && s.FaceRef.ParseError != null)
+            {
+                yield return ctx.Error("E204", "faceOf",
+                    "面引用解析失败:" + s.FaceRef.ParseError,
+                    new { action = "fix", field = "faceOf|faceNormal|faceIndex" });
+                yield break;
+            }
+
+            // faceOf 必填且为 @别名 或 obj-K
+            string fof = s.FaceRef != null ? s.FaceRef.FeatureName : null;
+            if (string.IsNullOrWhiteSpace(fof))
+            {
+                yield return ctx.Error("E204", "faceOf",
+                    "faceOf 必须是非空字符串(@别名 或 obj-K 句柄)。",
+                    new { action = "set", field = "faceOf" });
+                yield break;
+            }
+
+            if (fof.StartsWith("obj-", StringComparison.OrdinalIgnoreCase))
+                yield break;   // 句柄:静态校验不判
+
+            if (fof.StartsWith("@", StringComparison.Ordinal))
+            {
+                string key = fof.Substring(1);
+                int defIdx;
+                if (!ctx.DefinedFeatures.TryGetValue(key, out defIdx))
+                {
+                    yield return ctx.Error("E204", "faceOf",
+                        "未找到本批内命名特征 \"@" + key + "\"(需先给前面的特征带 name 创建)。",
+                        new { action = "define_feature", name = key, beforeFeature = ctx.Index });
+                }
+                else if (defIdx >= ctx.Index)
+                {
+                    yield return ctx.Error("E204", "faceOf",
+                        "\"@" + key + "\" 是在第 " + defIdx + " 个特征定义的,不能在当前第 " + ctx.Index +
+                        " 个特征(前向引用)使用——必须把那个特征移到前面。",
+                        new { action = "reorder", moveFeature = defIdx, beforeFeature = ctx.Index });
+                }
+                yield break;
+            }
+
+            // 其它格式(纯名字无 @ 前缀)按非法处理
+            yield return ctx.Error("E204", "faceOf",
+                "faceOf 必须以 \"@\" 开头(本批别名)或 \"obj-\" 开头(跨批句柄),当前 \"" + fof + "\"。",
+                new { action = "set", field = "faceOf", example = "@base" });
+        }
+    }
+
+    /// <summary>
+    /// E413:draft(拔模)参数校验。
+    /// side(DraftSide)只认 igInside=4 / igOutside=5(对照表 §一 真机验证:传 1/2/3 全 E_FAIL)。
+    /// angle 弧度 ∈ [0, π/2);plane 必给(draft 需拔模基准面)。
+    /// </summary>
+    public sealed class DraftRule : IFeatureRule
+    {
+        public string Code { get { return "E413"; } }
+        public Severity DefaultLevel { get { return Severity.Error; } }
+        public string[] AppliesTo { get { return new[] { "draft" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+
+            // angle 必给且 ∈ [0, π/2)
+            if (!s.Angle.HasValue && !s.Degrees.HasValue)
+            {
+                yield return ctx.Error("E413", "angle",
+                    "draft 必须给 angle(弧度)或 degrees(度)。",
+                    new { action = "provide", field = "angle|degrees" });
+            }
+            else
+            {
+                double a = s.Degrees.HasValue ? s.Degrees.Value * System.Math.PI / 180.0 : s.Angle.Value;
+                if (!(a >= 0) || !(a < System.Math.PI / 2))
+                    yield return ctx.Error("E413", "angle",
+                        "angle 必须 ∈ [0, π/2)(当前 " + GeoUtil.Fmt(a) + " 弧度 = " + (a * 180 / System.Math.PI) + "°)。",
+                        new { action = "set", field = "angle", min = 0, maxOpen = "π/2" });
+            }
+
+            // side(DraftSide)只认 4(igInside) 或 5(igOutside)
+            if (s.Side.HasValue && s.Side.Value != 4 && s.Side.Value != 5)
+            {
+                yield return ctx.Error("E413", "side",
+                    "draft 的 side 只能是 4(igInside,向内拔)或 5(igOutside,向外拔),传 1/2/3 全 E_FAIL(当前 " + s.Side.Value + ")。",
+                    new { action = "set", field = "side", allowed = new[] { 4, 5 } });
+            }
+        }
+    }
+
+    /// <summary>
+    /// E414:split(分割)参数校验。plane 必给(分割基准面);target 缺省用 Models.Item(1)。
+    /// </summary>
+    public sealed class SplitRule : IFeatureRule
+    {
+        public string Code { get { return "E414"; } }
+        public Severity DefaultLevel { get { return Severity.Error; } }
+        public string[] AppliesTo { get { return new[] { "split" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+
+            // plane 必给(走 PlaneRefRule 的 E201 也判,这里不重复)
+
+            // target 可选:给了必须是 @别名 或 obj-K
+            if (!string.IsNullOrEmpty(s.Target) &&
+                !s.Target.StartsWith("@", StringComparison.Ordinal) &&
+                !s.Target.StartsWith("obj-", StringComparison.OrdinalIgnoreCase))
+            {
+                yield return ctx.Error("E414", "target",
+                    "target 必须是 @别名 或 obj-K 句柄(当前 \"" + s.Target + "\")。",
+                    new { action = "set", field = "target", example = "@base" });
+            }
+        }
+    }
+
+    /// <summary>
+    /// E415:web_network(腹板网)参数校验。thickness/depth > 0;polygon 闭合环(参考 rib 实测结论)。
+    /// </summary>
+    public sealed class WebNetworkRule : IFeatureRule
+    {
+        public string Code { get { return "E415"; } }
+        public Severity DefaultLevel { get { return Severity.Error; } }
+        public string[] AppliesTo { get { return new[] { "web_network" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+
+            if (!s.Thickness.HasValue || !(s.Thickness.Value > 0))
+                yield return ctx.Error("E415", "thickness",
+                    "web_network 的 thickness 必须 > 0(米)。",
+                    new { action = "set", field = "thickness", must = "> 0", unit = "m" });
+
+            if (!s.Depth.HasValue || !(s.Depth.Value > 0))
+                yield return ctx.Error("E415", "depth",
+                    "web_network 的 depth 必须 > 0(米)。",
+                    new { action = "set", field = "depth", must = "> 0", unit = "m" });
+        }
+    }
+
+    /// <summary>
+    /// E416:thicken(曲面加厚)参数校验。thickness > 0;faceOf 必填(由 FeatureRefRule E204 判);
+    /// 坑:surface 自身 .Faces 抛异常,必须取自 Constructions.Item(n).Body.Faces(igQueryAll)。
+    /// </summary>
+    public sealed class ThickenRule : IFeatureRule
+    {
+        public string Code { get { return "E416"; } }
+        public Severity DefaultLevel { get { return Severity.Error; } }
+        public string[] AppliesTo { get { return new[] { "thicken" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+
+            if (!s.Thickness.HasValue || !(s.Thickness.Value > 0))
+                yield return ctx.Error("E416", "thickness",
+                    "thicken 的 thickness 必须 > 0(米)。",
+                    new { action = "set", field = "thickness", must = "> 0", unit = "m" });
+        }
+    }
+
+    /// <summary>
+    /// E417:delete_face(删面)参数校验。confirm 必须 true(破坏性操作,防误删);
+    /// faceOf 必填(由 FeatureRefRule E204 判);目标须是 blend 面(运行期判,静态只做结构校验)。
+    /// </summary>
+    public sealed class DeleteFaceRule : IFeatureRule
+    {
+        public string Code { get { return "E417"; } }
+        public Severity DefaultLevel { get { return Severity.Error; } }
+        public string[] AppliesTo { get { return new[] { "delete_face" }; } }
+
+        public IEnumerable<Issue> Check(ValidationContext ctx)
+        {
+            var s = ctx.Current;
+
+            if (s.Confirm != true)
+                yield return ctx.Error("E417", "confirm",
+                    "delete_face 是破坏性操作,必须显式传 \"confirm\":true 才会执行(防误删 blend 面)。",
+                    new { action = "set", field = "confirm", must = "true" });
         }
     }
 
