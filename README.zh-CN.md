@@ -12,7 +12,7 @@ Solid Edge 始终是唯一事实源：AI 不替代你的 CAD 工作流，而是�
 
 ![用 MCP 在 Solid Edge 里建模](assets/demo.gif)
 
-_一次建模过程：AI 通过 MCP 驱动 Solid Edge 逐个建出参数化特征。_
+_一次建模过程：AI 通过 MCP 驱动 Solid Edge 一步步把模型建出来。_
 
 ## 为什么做这个
 
