@@ -10,6 +10,8 @@ Solid Edge remains the single source of truth: the AI never replaces your CAD wo
 
 - [English](README.md) | [中文文档](README.zh-CN.md)
 
+![AI driving Solid Edge through MCP](assets/demo.gif)
+
 ## Why
 
 Mechanical engineers lose hours on repetitive CAD operations: filling in parametric models, renaming features, checking BOM consistency, exporting drawings. This project exposes Solid Edge's COM API to any MCP-capable AI client, so those steps become a conversation instead of a macro you have to write and maintain.

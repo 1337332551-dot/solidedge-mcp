@@ -10,6 +10,8 @@ Solid Edge 始终是唯一事实源：AI 不替代你的 CAD 工作流，而是�
 
 - [English](README.md) | [中文文档](README.zh-CN.md)
 
+![AI 通过 MCP 操作 Solid Edge](assets/demo.gif)
+
 ## 为什么做这个
 
 机械工程师每天在重复的 CAD 操作上消耗大量时间：填参数化模型、改特征名、核对 BOM 一致性、导出图纸。本项目把 Solid Edge 的 COM API 暴露给任何支持 MCP 的 AI 客户端，让这些步骤变成一段对话，而不是一个你必须自己写、自己维护的宏。
