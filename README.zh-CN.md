@@ -97,8 +97,15 @@ _一次建模过程：AI 通过 MCP 驱动 Solid Edge 一步步把模型建出�
 
 ## 构建
 
+不想编译？直接下载 `release/` 下的预编译包解压即可，只需要本机有 **.NET 8 运行时**（不需要 SDK）：
+
+- [`release/solidedge-mcp-win-x64.zip`](release/solidedge-mcp-win-x64.zip) —— 执行 server（`solidedge-mcp.exe`）
+- [`release/solidedge-event-mcp-win-x64.zip`](release/solidedge-event-mcp-win-x64.zip) —— 事件 server（`solidedge-event-mcp.exe`）
+
+从源码构建：
+
 ```powershell
-git clone https://github.com/1337332551-dot/solidedge-mcp.git
+git clone https://github.com/1337332551-dot/solidedge-mcp-server.git
 cd solidedge-mcp
 dotnet build src/SolidEdge.Spy.McpServer -c Release
 dotnet build src/SolidEdge.Spy.EventMcp  -c Release
