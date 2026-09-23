@@ -97,11 +97,6 @@ There is also a member-level guardrail (`Guardrail`) as a second onion layer, an
 
 ## Build
 
-Prefer not to build? Grab a prebuilt package from `release/` and unzip it — you only need the **.NET 8 runtime** (not the SDK):
-
-- [`release/solidedge-mcp-win-x64.zip`](release/solidedge-mcp-win-x64.zip) — execution server (`solidedge-mcp.exe`)
-- [`release/solidedge-event-mcp-win-x64.zip`](release/solidedge-event-mcp-win-x64.zip) — event server (`solidedge-event-mcp.exe`)
-
 Or build from source:
 
 ```powershell
