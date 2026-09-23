@@ -10,7 +10,9 @@ Solid Edge remains the single source of truth: the AI never replaces your CAD wo
 
 - [English](README.md) | [中文文档](README.zh-CN.md)
 
-![AI driving Solid Edge through MCP](assets/demo.gif)
+![Building a parametric model in Solid Edge through MCP](assets/demo.gif)
+
+_A model being built feature by feature — the AI drives Solid Edge through MCP._
 
 ## Why
 
