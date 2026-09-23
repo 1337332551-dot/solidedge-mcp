@@ -342,5 +342,80 @@ namespace SolidEdge.Spy.McpServer.Tests
             Assert.Equal(0.4, stock[4], 12);   // Y max
             Assert.Equal(0.05, stock[5], 12);  // Z max(+depth)
         }
+
+        // ---------- 2026-09-23 新op真机批次:SplitRule E414 存在性 + HelixRule W412 螺距 ----------
+
+        private const string PlateBase =
+            "{\"op\":\"extrude\",\"name\":\"plate\",\"plane\":\"RefPlane_1\",\"depth\":0.01,\"rect\":[[0,0],[0.1,0.05]]}";
+
+        [Fact]
+        public void split_target未知别名_E414报错()
+        {
+            // 真机负例 n6:@nope 引用不存在的名字此前只查前缀静默通过
+            var r = V("[" + PlateBase + ",{\"op\":\"split\",\"plane\":\"RefPlane_2\",\"target\":\"@nope\"}]");
+            Assert.True(Has(r, "E414"));
+        }
+
+        [Fact]
+        public void split_target前向引用别名_E414报错()
+        {
+            // @引用本批后面才定义的特征(前向引用)
+            var r = V("[" + PlateBase +
+                ",{\"op\":\"split\",\"plane\":\"RefPlane_2\",\"target\":\"@later\"}" +
+                ",{\"op\":\"extrude\",\"name\":\"later\",\"plane\":\"RefPlane_1\",\"depth\":0.005,\"rect\":[[0.2,0.2],[0.3,0.3]]}]");
+            Assert.True(Has(r, "E414"));
+        }
+
+        [Fact]
+        public void split_target向后引用合法别名_无E414()
+        {
+            var r = V("[" + PlateBase +
+                ",{\"op\":\"extrude\",\"name\":\"boss\",\"plane\":\"RefPlane_1\",\"depth\":0.005,\"rect\":[[0.2,0.2],[0.3,0.3]]}" +
+                ",{\"op\":\"split\",\"plane\":\"RefPlane_2\",\"target\":\"@boss\"}]");
+            Assert.False(Has(r, "E414"));
+        }
+
+        [Fact]
+        public void split_target对象句柄_无E414()
+        {
+            var r = V("[" + PlateBase + ",{\"op\":\"split\",\"plane\":\"RefPlane_2\",\"target\":\"obj-1\"}]");
+            Assert.False(Has(r, "E414"));
+        }
+
+        [Fact]
+        public void helix_螺距小于线半径_W412警告()
+        {
+            // 真机实证:重叠≥50%线径(pitch=0.005 < r=0.006)必得僵尸 1216476311
+            var r = V("[" + PlateBase +
+                ",{\"op\":\"helix\",\"plane\":\"RefPlane_1\",\"circle\":[0.03,0,0.006],\"axis\":[[0,0],[0,0.05]],\"pitch\":0.005,\"revolutions\":3}]");
+            Assert.True(Has(r, "W412"));
+        }
+
+        [Fact]
+        public void helix_螺距轻度重叠_不警告()
+        {
+            // 真机反例:重叠~8%(pitch=0.011, r=0.006)SE 实际能成体;阈值 (r,2r] 未定,不误报
+            var r = V("[" + PlateBase +
+                ",{\"op\":\"helix\",\"plane\":\"RefPlane_1\",\"circle\":[0.03,0,0.006],\"axis\":[[0,0],[0,0.05]],\"pitch\":0.011,\"revolutions\":3}]");
+            Assert.False(Has(r, "W412"));
+        }
+
+        [Fact]
+        public void helix_螺距大于线径_无W412()
+        {
+            var r = V("[" + PlateBase +
+                ",{\"op\":\"helix\",\"plane\":\"RefPlane_1\",\"circle\":[0.03,0,0.006],\"axis\":[[0,0],[0,0.05]],\"pitch\":0.015,\"revolutions\":3}]");
+            Assert.False(Has(r, "W412"));
+        }
+
+        [Fact]
+        public void helix_螺距大于线径_三给二_E412不误报()
+        {
+            // pitch+revolutions 两参合法推导(修正前 HelixFeat 常量 pitch=0.008<2r 误触 W412 的回归防线)
+            var r = V("[" + PlateBase +
+                ",{\"op\":\"helix\",\"plane\":\"RefPlane_1\",\"circle\":[0.03,0,0.005],\"axis\":[[0,0],[0,0.05]],\"pitch\":0.015,\"height\":0.04}]");
+            Assert.False(Has(r, "E412"));
+            Assert.False(Has(r, "W412"));
+        }
     }
 }
