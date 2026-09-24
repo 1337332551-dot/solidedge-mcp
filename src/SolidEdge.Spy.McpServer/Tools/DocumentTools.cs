@@ -299,7 +299,7 @@ public static class DocumentTools
 	}
 
 	[McpServerTool]
-	[Description("新建一个空的 Solid Edge 文档(未保存)并登记句柄、进入追踪表(origin=created)。只有本工具创建的文档会进追踪表;se_close_document 只能关闭追踪表里的文档。类型支持 part/assembly/draft/sheetmetal/weldment,也可直接传 ProgID(如 SolidEdge.PartDocument)。注意:新建文档从未保存,SE 视其为已修改(Dirty),因此关闭时需要 confirm=true——新建文档无内容,丢弃无损失。测试纪律:先盘点复用(se_invoke_chain 查 Documents.Count),确实要新建才用本工具,收尾逐个 se_close_document,别让测试文档堆积。")]
+	[Description("新建一个空的 Solid Edge 文档(未保存)并登记句柄、进入追踪表(origin=created)。只有本工具创建的文档会进追踪表;se_close_document 只能关闭追踪表里的文档。类型支持 part/assembly/draft/sheetmetal/weldment,也可直接传 ProgID(如 SolidEdge.PartDocument)。注意:新建文档从未保存,SE 视其为已修改(Dirty),因此关闭时需要 confirm=true——新建文档无内容,丢弃无损失。工具组没有独立保存工具,落盘走 se_invoke_member(句柄,'SaveAs',['全路径'])或脚本;要放进装配(se_assembly_build place)的零件必须先 SaveAs 落盘——place 的 file 参数需要文件路径。测试纪律:先盘点复用(se_invoke_chain 查 Documents.Count),确实要新建才用本工具,收尾逐个 se_close_document,别让测试文档堆积。")]
 	public static string se_new_document(SolidEdgeContext context, [Description("文档类型:part(默认)/assembly/draft/sheetmetal/weldment,或直接传 ProgID")] string docType = "part")
 	{
 		try
@@ -359,7 +359,7 @@ public static class DocumentTools
 						origin = "created",
 						createdAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
 						tracked = true,
-						hint = "未命名文档没有 FullName,追踪表以文档名为 key;SaveAs 后请继续用句柄关闭(key 不随改名更新)。该文档已切换为 ActiveDocument;关闭需 confirm=true(新文档在 SE 里视为已修改)。"
+						hint = "未命名文档没有 FullName,追踪表以文档名为 key;SaveAs 后请继续用句柄关闭(key 不随改名更新)。该文档已切换为 ActiveDocument;关闭需 confirm=true(新文档在 SE 里视为已修改)。落盘:se_invoke_member(本句柄,'SaveAs',['全路径']) 或脚本;要装配 place 的零件必须先落盘(place.file 需文件路径)。"
 					});
 				}
 				finally

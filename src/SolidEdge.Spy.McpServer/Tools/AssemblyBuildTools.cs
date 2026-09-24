@@ -41,7 +41,10 @@ namespace SolidEdge.Spy.McpServer.Tools
             "(★默认自动解固 component1 的固定约束再求解——固定件上加约束不生效(2026-09-22 实测);" +
             "component2 视为基准件、其固定不动;keepGround=true 显式保留固定(仅基准件场景,此时回传 warning);" +
             "planar 的 mate=true=贴合(可能翻转零件180°,与轴向约束同用时给 false=共面同向);" +
-            "axial 的 face 须是圆柱面)。" +
+            "face1/face2=该零件 Models.Item(1).Body.Faces 全量面列表的【0-based】序号" +
+            "(上界=se_assembly_query occurrences[].faceCount;axial 两面须圆柱面);" +
+            "constrain 返回 relation_status(工具已自动 UpdateAll 后回读——直接读 Status 会因求解滞后得假成功,=1 才是真求解,0/5=冲突固死)" +
+            "与 component1_position(求解后零件位置,回读级证据),调用方无需再自行验证求解)。" +
             "component 写法:0-based 序号 / 零件名(如 \"Par1.par:1\") / 句柄 obj-N。" +
             "诚实拒绝(校验期拦截并给替代方案):constrain type=angular/tangent/point/gear、op=pattern/mirror/suppress/unsuppress —— " +
             "SE2022 实测 COM 自动化不可达(部分在 SE2026 的 pywin32 通道可用,见拒绝文案)。" +

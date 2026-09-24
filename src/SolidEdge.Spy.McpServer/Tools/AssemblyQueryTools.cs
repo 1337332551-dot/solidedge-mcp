@@ -27,8 +27,9 @@ namespace SolidEdge.Spy.McpServer.Tools
             "源文件、显示状态、16 元素变换矩阵(行主序,平移在 [12..14],米);mode=\"relations\" 返回约束清单——" +
             "类型(Ground/Axial/Planar/...)、Status(1=求解成功)、Offset、法向对齐状态;" +
             "mode=\"bom\" 返回 BOM 统计——按源文件聚合的数量(含子装配递归,跳过 IncludeInBom=false,标注 IsPatternItem);" +
-            "mode=\"all\" 三者都返回。典型流程:先 se_assembly_query 拿零件序号和面数,再对 se_assembly_build " +
-            "下 place/move/constrain 等 op。只读模式(SE_MCP_READONLY=1)下也可用。")]
+            "mode=\"all\" 三者都返回。典型流程:先 se_assembly_query 拿零件 0-based 序号与各零件 faceCount" +
+            "(=se_assembly_build constrain face1/face2 可填的 0-based 面序号上界),再下 build op。" +
+            "只读模式(SE_MCP_READONLY=1)下也可用。")]
         public static string se_assembly_query(
             SolidEdgeContext context,
             [Description("查询模式:occurrences / relations / bom / all,默认 occurrences")] string mode = "occurrences",
@@ -104,6 +105,19 @@ namespace SolidEdge.Spy.McpServer.Tools
                     object subs = AssemblySpec.Get(occ, "SubOccurrences");
                     int subCount = GetCount(subs);
                     item["subOccurrenceCount"] = subCount >= 0 ? subCount : 0;
+                    // faceCount:该零件 Body 全量面数 = se_assembly_build constrain face1/face2 可填的 0-based 面序号上界。
+                    // 子装配无实体 Body → 0(constrain 对子装配本来也不可用)。
+                    try
+                    {
+                        object pdoc = AssemblySpec.Get(occ, "OccurrenceDocument");
+                        object models = pdoc == null ? null : AssemblySpec.Get(pdoc, "Models");
+                        object model = models == null ? null : AssemblySpec.Call(models, "Item", new object[] { 1 });
+                        object body = model == null ? null : AssemblySpec.Get(model, "Body");
+                        object faces = body == null ? null : AssemblySpec.Call(body, "Faces", new object[] { 1 });
+                        int fc = faces == null ? 0 : GetCount(faces);
+                        item["faceCount"] = fc >= 0 ? fc : 0;
+                    }
+                    catch { item["faceCount"] = 0; }
                     list.Add(item);
                 }
                 catch (Exception ex)

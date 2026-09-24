@@ -93,6 +93,7 @@ namespace SolidEdge.Spy.McpServer.Tools
             "loft 放样 {op:'loft', profiles:[{plane,形状},...]≥2 项单闭合轮廓, origin?:[u,v] 截面锚点(缺省按形状推导), mode?:'cut'(默认凸台)};" +
             "sweep 扫掠 {op:'sweep', profiles:[首项=路径,其余=截面]}——路径用 polygon 时按【开放链】解释(≥2 点不闭合),circle/rect/loops 则是闭合路径(扫一整圈);" +
             "helix 螺旋 {op:'helix', plane, 单闭合截面, axis(同 revolve 的两点轴), pitch/height/revolutions 三给二(螺距m/高度m/圈数,第三个由SE推导), mode?:'cut'}。" +
+            "plane 局部参考面 {op:'plane', name:'别名', base:'RefPlane_1/2/3'或'@别名', distance:偏移米}——base+distance 建平行偏置面(省 distance=与 base 重合),后续特征用 plane:'@别名' 引用;" +
             "features 每项 {op, name?, plane|base, 形状, side, profileside, depth, axis?, angle?|degrees?, visible?}。" +
             "op=revolve 旋转凸台(默认)或旋转切割(mode:\"cut\"走 RevolvedCutout):截面用 rect/polygon/loops,必须给 axis 旋转轴两点(草图平面局部 u/v," +
             "如 \"axis\":[[0,0],[0,0.05]] 沿局部 v 轴);angle 弧度(默认 2π 整圈)或 degrees 度。" +
